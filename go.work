@@ -1,0 +1,13 @@
+go 1.27.0
+
+// Lets the gin integration build/test against this repo's own local copy of the root module,
+// without a `replace` directive in integrations/gin/go.mod itself -- that would break for anyone
+// who `go get`s the gin integration for real, since Go's module proxy only fetches the file tree
+// rooted at that module's own directory, and a `replace ... => ../..` relative path reaches
+// outside of what's actually fetched. go.work is purely a local build convenience: it's never
+// part of what a `go get` fetches for either module, so it can't affect an external consumer at
+// all, which is exactly why it's the right tool here instead.
+use (
+	.
+	./integrations/gin
+)
