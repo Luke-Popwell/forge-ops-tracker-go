@@ -228,3 +228,67 @@ func TestBreadcrumbsAndTiming(t *testing.T) {
 		}
 	})
 }
+
+func TestTimingOpensATraceAndSendsASlowRequestsSpans(t *testing.T) {
+	traceCh := make(chan map[string]any, 2)
+	tracker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if _, ok := body["trace_id"]; ok {
+			traceCh <- body
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer tracker.Close()
+
+	forgeops.Init(func(c *forgeops.Configuration) {
+		c.DSN = "http://key@" + tracker.Listener.Addr().String() + "/api/v1/events"
+		c.Environment = "production"
+		c.Timeout = time.Second
+		c.TrackTracing = true
+		c.TraceCaptureThreshold = 40 * time.Millisecond
+	})
+
+	handler := Timing(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/slow" {
+			_, end := forgeops.StartSpan(r.Context(), "charge card", "service", nil)
+			time.Sleep(60 * time.Millisecond)
+			end()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	app := httptest.NewServer(handler)
+	defer app.Close()
+
+	if resp, err := http.Get(app.URL + "/fast"); err == nil {
+		resp.Body.Close()
+	}
+	if resp, err := http.Get(app.URL + "/slow"); err == nil {
+		resp.Body.Close()
+	}
+
+	select {
+	case trace := <-traceCh:
+		names := map[string]map[string]any{}
+		for _, s := range trace["spans"].([]any) {
+			span := s.(map[string]any)
+			names[span["name"].(string)] = span
+		}
+		root := names["GET /slow"]
+		charge := names["charge card"]
+		if root == nil || charge == nil {
+			t.Fatalf("spans = %v, want a root GET /slow and a charge card span", trace["spans"])
+		}
+		if root["parent_span_id"] != nil || charge["parent_span_id"] != root["span_id"] {
+			t.Errorf("root = %v, charge = %v: charge card should nest under the root", root, charge)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the slow request's trace was never delivered")
+	}
+
+	select {
+	case extra := <-traceCh:
+		t.Errorf("a second trace was delivered (%v): the fast request must never be sent", extra["spans"])
+	case <-time.After(150 * time.Millisecond):
+	}
+}

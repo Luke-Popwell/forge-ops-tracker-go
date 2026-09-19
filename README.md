@@ -154,6 +154,47 @@ forgeops.Init(func(c *forgeops.Configuration) {
 })
 ```
 
+## Distributed tracing
+
+Each request gets its own trace: a root span for the request plus a tree of spans nested under it
+(service work you wrap yourself, outbound HTTP calls, anything else you record). **Only a slow
+request's trace is ever sent**: once the request finishes and its real duration is known, the whole
+trace goes out only if it reached `TraceCaptureThreshold` (1 second by default); a fast request's
+spans are dropped, so it costs nothing over the wire. On by default; turn it off with
+`TrackTracing = false`.
+
+The `nethttp.Timing` and `gin.Timing` middlewares open the trace on the request's own context and
+finish it for you (the root span is named like the performance transaction: the matched route
+pattern under Gin, the literal path under plain net/http). Inside a handler:
+
+```go
+ctx, end := forgeops.StartSpan(r.Context(), "charge card", "service", map[string]any{"order_id": id})
+defer end()
+// pass ctx to everything the span covers: anything opened from it nests under "charge card"
+```
+
+The open span travels in the `context.Context`, not on a shared stack, so goroutines that each open
+a span from the same context each parent correctly (to the request root), and a child opened inside
+one parents to that one, whatever order they interleave in (a test pins this).
+
+Outbound HTTP is recorded as an `http` span, named `METHOD host` (never the path or query, which
+could carry an id or a token), if you make the call with a trace-carrying context through the
+wrapped transport:
+
+```go
+client := &http.Client{Transport: forgeops.Transport(nil)}
+req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+resp, err := client.Do(req)
+```
+
+`Transport` never changes the request, the response, or the error. A request made with a bare
+`context.Background()` records nothing, and every call is a no-op when the context carries no trace.
+For work that isn't an HTTP request (a queue consumer, a cron job), call `forgeops.WithTrace(ctx)` at
+the start and `forgeops.FinishTrace(ctx, name, startedAt, duration)` at the end yourself.
+
+Delivery is on its own small goroutine and bounded queue (one trace per POST to `/spans`), so
+reporting a slow request never makes it slower; a full queue drops the trace rather than blocking.
+
 ## Source context
 
 By default, each in-app backtrace frame (never a standard-library or module-cache frame) is
@@ -198,6 +239,35 @@ forgeops.Init(func(c *forgeops.Configuration) {
 Requires a ForgeOps plan that includes performance monitoring; on a plan that doesn't, the
 periodic flushes are simply rejected server-side and dropped, exactly like any other delivery
 failure.
+
+## Custom metrics and infrastructure monitoring
+
+Two explicit calls (nothing is automatic, so there is no `Track*` flag): a business event you name
+yourself, and a reading from one of your own hosts.
+
+```go
+forgeops.CaptureMetric("signup", 1)    // a bare counter
+forgeops.CaptureMetric("payment", 49)  // a real magnitude; it may be negative (a refund)
+
+forgeops.CaptureInfrastructureMetric("cpu", 0.42, "")      // "" defaults to Configuration.ServerName
+forgeops.CaptureInfrastructureMetric("disk", 0.81, "db-1")
+forgeops.FlushMetrics()                                    // send right now
+```
+
+Each capture is buffered and flushed as one batch every `MetricFlushInterval` /
+`InfrastructureMetricFlushInterval` (60 seconds by default) on a goroutine started on the first
+capture. **Go has no exit hook to flush from**, so a short-lived program (a cron job) must call
+`forgeops.FlushMetrics()` before it returns from `main`, typically `defer`red right after `Init`.
+Every entry is stored as it was captured (a signup is a row, not a running total), so a count or sum
+you compute later is exact. Both are a no-op when the client isn't enabled for the environment.
+
+A failed delivery keeps every entry for the next flush, and an entry captured while a delivery is in
+flight is kept too (the Ruby gem's own buffer loses it; a `-race` test pins this with a gated
+delivery). The buffer holds at most 1000 entries per kind and drops further ones until a flush
+succeeds, since a plan without the feature rejects every flush and would otherwise grow it for as
+long as the process lives. A NaN or infinite value is dropped at capture: `encoding/json` refuses to
+marshal one, which would make every batch behind it fail to send. Requires a ForgeOps plan that
+includes custom metrics / infrastructure monitoring.
 
 ## Breadcrumbs
 

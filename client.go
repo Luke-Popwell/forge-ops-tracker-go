@@ -38,6 +38,22 @@ func (c *Client) DeliverPerformanceSamples(samples []map[string]any) bool {
 	return c.post(c.configuration.PerformanceSamplesURI(), map[string]any{"samples": samples})
 }
 
+// DeliverSpans posts one whole captured trace: {"trace_id": ..., "spans": [...]}, unlike
+// DeliverPerformanceSamples' batch over a time window. One trace, one POST.
+func (c *Client) DeliverSpans(trace map[string]any) bool {
+	return c.post(c.configuration.SpansURI(), trace)
+}
+
+// DeliverMetrics posts a batch of individual CaptureMetric entries as {"metrics": [...]}.
+func (c *Client) DeliverMetrics(entries []map[string]any) bool {
+	return c.post(c.configuration.CustomMetricsURI(), map[string]any{"metrics": entries})
+}
+
+// DeliverInfrastructureMetrics posts a batch of infrastructure readings the same way.
+func (c *Client) DeliverInfrastructureMetrics(entries []map[string]any) bool {
+	return c.post(c.configuration.InfrastructureMetricsURI(), map[string]any{"metrics": entries})
+}
+
 func (c *Client) post(uri string, payload map[string]any) bool {
 	if uri == "" {
 		return false

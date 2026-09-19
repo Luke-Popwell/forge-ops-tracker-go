@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"time"
 )
 
 var (
@@ -28,6 +29,9 @@ var (
 	configuration      *Configuration
 	reporter           *Reporter
 	performanceFlusher *PerformanceFlusher
+	spanQueue          *SpanQueue
+	metricBuffer       *MetricBuffer
+	infraBuffer        *MetricBuffer
 )
 
 func state() (*Configuration, *Reporter) {
@@ -54,6 +58,80 @@ func performanceState() (*Configuration, *PerformanceFlusher) {
 		performanceFlusher = NewPerformanceFlusher(configuration, NewClient(configuration))
 	}
 	return configuration, performanceFlusher
+}
+
+// spanState mirrors performanceState for the span queue, locking mu itself for the same
+// non-reentrancy reason.
+func spanState() (*Configuration, *SpanQueue) {
+	mu.Lock()
+	defer mu.Unlock()
+	ensureConfigurationLocked()
+	if spanQueue == nil {
+		spanQueue = NewSpanQueue(configuration, NewClient(configuration))
+	}
+	return configuration, spanQueue
+}
+
+// metricState mirrors spanState for the two metric buffers, created together on first use:
+// independent of each other (a script may only ever call one), but cheap enough that creating both
+// is simpler than tracking which.
+func metricState() (*Configuration, *MetricBuffer, *MetricBuffer) {
+	mu.Lock()
+	defer mu.Unlock()
+	ensureConfigurationLocked()
+	if metricBuffer == nil {
+		config := configuration
+		client := NewClient(config)
+		metricBuffer = NewMetricBuffer(config, client.DeliverMetrics, func() time.Duration { return config.MetricFlushInterval })
+		infraBuffer = NewMetricBuffer(config, client.DeliverInfrastructureMetrics, func() time.Duration { return config.InfrastructureMetricFlushInterval })
+	}
+	return configuration, metricBuffer, infraBuffer
+}
+
+// CaptureMetric records a named business metric (a signup, a payment, anything you want to name),
+// buffered and flushed periodically as one batch rather than one network call per capture. Pass 1
+// for a bare counter-style call ("a signup happened") or a real magnitude ("a $49 payment"); it may
+// be negative (a refund). A no-op when the client isn't enabled (no DSN, or this environment isn't in
+// EnabledEnvironments), and a NaN or infinite value is dropped.
+//
+// Go has no exit hook to flush from, so a short-lived program should call FlushMetrics before it
+// returns from main (typically deferred right after Init).
+func CaptureMetric(name string, value float64) {
+	config, metrics, _ := metricState()
+	if !config.IsEnabled() {
+		return
+	}
+	metrics.Record(map[string]any{"metric_name": name, "value": value, "environment": config.Environment, "release": nilIfEmpty(config.Release)})
+}
+
+// CaptureInfrastructureMetric records one infrastructure reading (CPU, memory, disk, anything else a
+// script of yours reads) from one of your own hosts. An empty hostname defaults to
+// Configuration.ServerName, so a script running on the box it reports about needs no argument. Same
+// buffered-batch delivery and no-op-when-disabled contract as CaptureMetric.
+func CaptureInfrastructureMetric(name string, value float64, hostname string) {
+	config, _, infrastructure := metricState()
+	if !config.IsEnabled() {
+		return
+	}
+	if hostname == "" {
+		hostname = config.ServerName
+	}
+	infrastructure.Record(map[string]any{"metric_name": name, "value": value, "hostname": hostname})
+}
+
+// FlushMetrics delivers every buffered metric and infrastructure reading right now, instead of
+// waiting for the next flush interval.
+func FlushMetrics() {
+	_, metrics, infrastructure := metricState()
+	metrics.Flush()
+	infrastructure.Flush()
+}
+
+func nilIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // ensureConfigurationLocked must only be called with mu already held.
@@ -207,4 +285,7 @@ func resetForTesting() {
 	configuration = nil
 	reporter = nil
 	performanceFlusher = nil
+	spanQueue = nil
+	metricBuffer = nil
+	infraBuffer = nil
 }

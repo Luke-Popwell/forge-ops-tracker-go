@@ -206,3 +206,72 @@ func TestBreadcrumbsAndTiming(t *testing.T) {
 		}
 	})
 }
+
+func TestTimingOpensATraceAndSendsASlowRequestsSpans(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	traceCh := make(chan map[string]any, 2)
+	tracker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if _, ok := body["trace_id"]; ok {
+			traceCh <- body
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer tracker.Close()
+
+	forgeops.Init(func(c *forgeops.Configuration) {
+		c.DSN = "http://key@" + tracker.Listener.Addr().String() + "/api/v1/events"
+		c.Environment = "production"
+		c.Timeout = time.Second
+		c.TrackTracing = true
+		c.TraceCaptureThreshold = 40 * time.Millisecond
+	})
+
+	router := gin.New()
+	router.Use(Timing())
+	router.GET("/orders/:id", func(c *gin.Context) {
+		_, end := forgeops.StartSpan(c.Request.Context(), "charge card", "service", nil)
+		if c.Param("id") == "slow" {
+			time.Sleep(60 * time.Millisecond)
+		}
+		end()
+		c.Status(http.StatusOK)
+	})
+	app := httptest.NewServer(router)
+	defer app.Close()
+
+	if resp, err := http.Get(app.URL + "/orders/fast"); err == nil {
+		resp.Body.Close()
+	}
+	if resp, err := http.Get(app.URL + "/orders/slow"); err == nil {
+		resp.Body.Close()
+	}
+
+	select {
+	case trace := <-traceCh:
+		names := map[string]map[string]any{}
+		for _, sp := range trace["spans"].([]any) {
+			span := sp.(map[string]any)
+			names[span["name"].(string)] = span
+		}
+		// The root is named by the matched route pattern, not the raw path, so a distinct id never
+		// explodes into its own trace name.
+		root := names["GET /orders/:id"]
+		charge := names["charge card"]
+		if root == nil || charge == nil {
+			t.Fatalf("spans = %v, want a root GET /orders/:id and a charge card span", trace["spans"])
+		}
+		if root["parent_span_id"] != nil || charge["parent_span_id"] != root["span_id"] {
+			t.Errorf("root = %v, charge = %v: charge card should nest under the root", root, charge)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the slow request's trace was never delivered")
+	}
+
+	select {
+	case extra := <-traceCh:
+		t.Errorf("a second trace was delivered (%v): the fast request must never be sent", extra["spans"])
+	case <-time.After(150 * time.Millisecond):
+	}
+}

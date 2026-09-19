@@ -75,14 +75,19 @@ func Recovery() gin.HandlerFunc {
 // actually worth having) would silently never get either.
 func Timing() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// A fresh trace on the request's own context: see forgeops.WithTrace. Finished below, once
+		// the root span's own real duration is known.
+		c.Request = c.Request.WithContext(forgeops.WithTrace(c.Request.Context()))
 		start := time.Now()
 		defer func() {
-			durationMs := float64(time.Since(start)) / float64(time.Millisecond)
+			duration := time.Since(start)
+			durationMs := float64(duration) / float64(time.Millisecond)
 			route := c.FullPath()
 			if route == "" {
 				route = c.Request.URL.Path
 			}
 			forgeops.RecordPerformance(c.Request.Method+" "+route, durationMs)
+			forgeops.FinishTrace(c.Request.Context(), c.Request.Method+" "+route, start, duration)
 
 			level := "info"
 			status := c.Writer.Status()

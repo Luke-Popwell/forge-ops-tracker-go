@@ -46,6 +46,13 @@ type Configuration struct {
 	// periodically report an aggregate per transaction (see PerformanceFlusher). On by default,
 	// the same "on unless you turn it off" posture error tracking itself already has.
 	TrackPerformance bool
+	// MetricFlushInterval and InfrastructureMetricFlushInterval are the time between flushes of the
+	// buffered CaptureMetric / CaptureInfrastructureMetric entries (see MetricBuffer). There is no
+	// TrackMetrics flag the way TrackPerformance has one: these are explicit calls the host app's
+	// own code makes, not automatic instrumentation, so there is nothing to turn off that simply
+	// not calling them doesn't already do.
+	MetricFlushInterval               time.Duration
+	InfrastructureMetricFlushInterval time.Duration
 	// PerformanceFlushInterval is the time between aggregate performance reports; requests are
 	// timed in-process and flushed as one small batch on this interval, not one network call
 	// per request.
@@ -62,6 +69,16 @@ type Configuration struct {
 	// MaxBreadcrumbs is the most recent entries a single trail keeps; the oldest is dropped once
 	// full. Matches gems/forge_ops_tracker's own default exactly.
 	MaxBreadcrumbs int
+
+	// TrackTracing controls whether the net/http/Gin Timing middlewares open a trace per request
+	// (see WithTrace) and whether StartSpan/RecordSpan/Transport record anything. On by default, the
+	// same "on unless you turn it off" posture every other tracking mechanism here has; tracing is a
+	// plan-gated feature, enforced server-side, so an org without it just gets a 403 it ignores.
+	TrackTracing bool
+	// TraceCaptureThreshold is how long a request's root span must run before its whole trace is
+	// sent at all: the entire point of the feature, not a sampling knob (a fast request costs
+	// nothing over the wire). 1 second, matching gems/forge_ops_tracker's own default.
+	TraceCaptureThreshold time.Duration
 }
 
 // NewConfiguration returns a Configuration seeded from FORGE_OPS_DSN/FORGE_OPS_ENVIRONMENT/
@@ -70,21 +87,25 @@ type Configuration struct {
 func NewConfiguration() *Configuration {
 	cwd, _ := os.Getwd()
 	return &Configuration{
-		DSN:                      os.Getenv("FORGE_OPS_DSN"),
-		Environment:              envOrDefault("FORGE_OPS_ENVIRONMENT", "development"),
-		Release:                  os.Getenv("FORGE_OPS_RELEASE"),
-		ServerName:               safeHostname(),
-		AppRoot:                  cwd,
-		EnabledEnvironments:      map[string]bool{"production": true, "staging": true},
-		QueueSize:                1000,
-		Timeout:                  2 * time.Second,
-		ScrubPII:                 true,
-		CaptureSourceContext:     true,
-		Logger:                   noopLogger{},
-		TrackPerformance:         true,
-		PerformanceFlushInterval: 60 * time.Second,
-		TrackBreadcrumbs:         true,
-		MaxBreadcrumbs:           30,
+		DSN:                               os.Getenv("FORGE_OPS_DSN"),
+		Environment:                       envOrDefault("FORGE_OPS_ENVIRONMENT", "development"),
+		Release:                           os.Getenv("FORGE_OPS_RELEASE"),
+		ServerName:                        safeHostname(),
+		AppRoot:                           cwd,
+		EnabledEnvironments:               map[string]bool{"production": true, "staging": true},
+		QueueSize:                         1000,
+		Timeout:                           2 * time.Second,
+		ScrubPII:                          true,
+		CaptureSourceContext:              true,
+		Logger:                            noopLogger{},
+		TrackPerformance:                  true,
+		MetricFlushInterval:               60 * time.Second,
+		InfrastructureMetricFlushInterval: 60 * time.Second,
+		PerformanceFlushInterval:          60 * time.Second,
+		TrackBreadcrumbs:                  true,
+		MaxBreadcrumbs:                    30,
+		TrackTracing:                      true,
+		TraceCaptureThreshold:             time.Second,
 	}
 }
 
@@ -137,6 +158,44 @@ func (c *Configuration) PerformanceSamplesURI() string {
 	const suffix = "/events"
 	if strings.HasSuffix(uri, suffix) {
 		return strings.TrimSuffix(uri, suffix) + "/performance_samples"
+	}
+	return uri
+}
+
+// CustomMetricsURI returns the same ingestion URL with the trailing "/events" swapped for
+// "/custom_metrics".
+func (c *Configuration) CustomMetricsURI() string {
+	return c.swapEventsSuffix("/custom_metrics")
+}
+
+// InfrastructureMetricsURI returns the same ingestion URL with the trailing "/events" swapped for
+// "/infrastructure_metrics".
+func (c *Configuration) InfrastructureMetricsURI() string {
+	return c.swapEventsSuffix("/infrastructure_metrics")
+}
+
+func (c *Configuration) swapEventsSuffix(replacement string) string {
+	uri := c.IngestionURI()
+	if uri == "" {
+		return ""
+	}
+	const suffix = "/events"
+	if strings.HasSuffix(uri, suffix) {
+		return strings.TrimSuffix(uri, suffix) + replacement
+	}
+	return uri
+}
+
+// SpansURI returns the same ingestion URL with the trailing "/events" swapped for "/spans": one
+// captured trace, one POST, matching gems/forge_ops_tracker's own Configuration#spans_uri.
+func (c *Configuration) SpansURI() string {
+	uri := c.IngestionURI()
+	if uri == "" {
+		return ""
+	}
+	const suffix = "/events"
+	if strings.HasSuffix(uri, suffix) {
+		return strings.TrimSuffix(uri, suffix) + "/spans"
 	}
 	return uri
 }

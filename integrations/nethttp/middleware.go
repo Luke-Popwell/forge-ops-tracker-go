@@ -61,10 +61,16 @@ func Middleware(next http.Handler) http.Handler {
 func Timing(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		// A fresh trace on the request's own context, so StartSpan/RecordSpan/forgeops.Transport
+		// calls made anywhere inside next attach to it: see forgeops.WithTrace. Finished below,
+		// once the root span's own real duration is known.
+		r = r.WithContext(forgeops.WithTrace(r.Context()))
 		start := time.Now()
 		defer func() {
-			durationMs := float64(time.Since(start)) / float64(time.Millisecond)
+			duration := time.Since(start)
+			durationMs := float64(duration) / float64(time.Millisecond)
 			forgeops.RecordPerformance(r.Method+" "+r.URL.Path, durationMs)
+			forgeops.FinishTrace(r.Context(), r.Method+" "+r.URL.Path, start, duration)
 
 			level := "info"
 			if recorder.status >= 500 {
