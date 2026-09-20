@@ -27,7 +27,7 @@ variable or explicitly:
 import forgeops "github.com/Luke-Popwell/forge-ops-tracker-go"
 
 forgeops.Init(func(c *forgeops.Configuration) {
-    c.DSN = "https://<api_key>@your-forgeops-host/api/v1/events" // or leave unset to read FORGE_OPS_DSN
+    c.DSN = "https://<api_key>@getforgeops.net/api/v1/events" // or leave unset to read FORGE_OPS_DSN
     c.Release = "..."
     c.Environment = "production"
 })

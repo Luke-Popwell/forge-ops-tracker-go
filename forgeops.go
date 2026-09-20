@@ -2,7 +2,7 @@
 // instance:
 //
 //	forgeops.Init(func(c *forgeops.Configuration) {
-//		c.DSN = "https://<api_key>@your-forgeops-host/api/v1/events"
+//		c.DSN = "https://<api_key>@getforgeops.net/api/v1/events"
 //	})
 //
 // See the README for net/http and Gin integration, and what gets captured automatically vs. what
