@@ -1,6 +1,6 @@
 # tracker-go
 
-Go error reporting client for a [ForgeOps](../../) instance. Requires
+Go error reporting client for [ForgeOps](https://getforgeops.net). Requires
 Go 1.21+. It captures panics and reported `error` values, builds a backtrace, scrubs likely PII, and
 delivers events to ForgeOps over HTTP without blocking the caller.
 

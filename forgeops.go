@@ -1,5 +1,4 @@
-// Package forgeops is a Go error reporting client for a ForgeOps tracker
-// instance:
+// Package forgeops is a Go error reporting client for ForgeOps:
 //
 //	forgeops.Init(func(c *forgeops.Configuration) {
 //		c.DSN = "https://<api_key>@getforgeops.net/api/v1/events"
