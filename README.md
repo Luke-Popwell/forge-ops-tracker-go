@@ -229,6 +229,11 @@ route-matching concept of its own at this module's Go version floor to read a pa
 generically, so `forgeopshttp.Timing` reports the literal request path instead; a host app using
 chi or gorilla/mux could get the same low-cardinality benefit by wrapping this differently.
 
+Each aggregate also carries a small latency histogram (a count per fixed latency bucket: 50, 100,
+250, 500, 1000, 2500, 5000 and 10000ms, plus an overflow bucket), so ForgeOps can show an
+approximate p50/p95/p99 per transaction, not just an average. Percentiles are accurate to the width
+of whichever bucket a duration falls into; the SDK never stores the individual durations.
+
 ```go
 forgeops.Init(func(c *forgeops.Configuration) {
     c.TrackPerformance = false                        // opt out entirely

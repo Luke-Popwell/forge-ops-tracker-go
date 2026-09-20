@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -220,5 +221,127 @@ func TestPerformanceFlusherTickerFlushesOnItsOwn(t *testing.T) {
 	case <-delivered:
 	case <-time.After(2 * time.Second):
 		t.Fatal("performance sample was not delivered by the ticker in time")
+	}
+}
+
+// collectingServer records every sample delivered to it; failing makes it respond 500 so the
+// flusher treats delivery as failed.
+func collectingServer(t *testing.T, mu *sync.Mutex, delivered *[]map[string]any, failing *atomic.Bool) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if failing != nil && failing.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		samples, _ := body["samples"].([]any)
+		for _, s := range samples {
+			*delivered = append(*delivered, s.(map[string]any))
+		}
+		mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+	}))
+}
+
+func TestPerformanceFlusherDeliversALatencyHistogramAlongsideCountSumAndMax(t *testing.T) {
+	var mu sync.Mutex
+	var delivered []map[string]any
+	server := collectingServer(t, &mu, &delivered, nil)
+	defer server.Close()
+
+	config := newPerformanceConfiguration("http://key@" + server.Listener.Addr().String() + "/api/v1/events")
+	flusher := NewPerformanceFlusher(config, NewClient(config))
+	for _, duration := range []float64{10, 40, 120, 700, 12000} {
+		flusher.Record("GET /posts", duration)
+	}
+	flusher.Flush()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(delivered) != 1 {
+		t.Fatalf("delivered %d samples, want 1", len(delivered))
+	}
+	want := map[string]any{"50": float64(2), "250": float64(1), "1000": float64(1), "inf": float64(1)}
+	if !reflect.DeepEqual(delivered[0]["histogram"], want) {
+		t.Errorf("histogram = %v, want %v", delivered[0]["histogram"], want)
+	}
+}
+
+func TestPerformanceFlusherKeepsHistogramCountsForTheNextFlushWhenDeliveryFails(t *testing.T) {
+	var mu sync.Mutex
+	var delivered []map[string]any
+	var failing atomic.Bool
+	failing.Store(true)
+	server := collectingServer(t, &mu, &delivered, &failing)
+	defer server.Close()
+
+	config := newPerformanceConfiguration("http://key@" + server.Listener.Addr().String() + "/api/v1/events")
+	flusher := NewPerformanceFlusher(config, NewClient(config))
+	flusher.Record("GET /posts", 10)
+	flusher.Flush() // fails; the histogram must not be reset
+
+	failing.Store(false)
+	flusher.Record("GET /posts", 300)
+	flusher.Flush()
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := map[string]any{"50": float64(1), "500": float64(1)}
+	if len(delivered) != 1 || !reflect.DeepEqual(delivered[0]["histogram"], want) {
+		t.Errorf("delivered = %v, want one sample with histogram %v", delivered, want)
+	}
+}
+
+func TestPerformanceFlusherSendsAHistogramCountRecordedDuringDeliveryOnTheNextFlush(t *testing.T) {
+	var mu sync.Mutex
+	var delivered []map[string]any
+	var flusher *PerformanceFlusher
+	var once sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		samples, _ := body["samples"].([]any)
+		for _, s := range samples {
+			delivered = append(delivered, s.(map[string]any))
+		}
+		mu.Unlock()
+		// Lands between the snapshot and delivery succeeding: for a bucket already in the
+		// snapshot, and for a brand-new one.
+		once.Do(func() {
+			flusher.Record("GET /posts", 300)
+			flusher.Record("GET /new", 5)
+		})
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	config := newPerformanceConfiguration("http://key@" + server.Listener.Addr().String() + "/api/v1/events")
+	flusher = NewPerformanceFlusher(config, NewClient(config))
+	flusher.Record("GET /posts", 10)
+	flusher.Flush()
+	flusher.Flush()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(delivered) != 3 {
+		t.Fatalf("delivered %d samples, want 3 (1 first flush + 2 second)", len(delivered))
+	}
+	if !reflect.DeepEqual(delivered[0]["histogram"], map[string]any{"50": float64(1)}) {
+		t.Errorf("first flush histogram = %v, want {50: 1}", delivered[0]["histogram"])
+	}
+	for _, s := range delivered[1:] {
+		switch s["transaction_name"] {
+		case "GET /posts":
+			if !reflect.DeepEqual(s["histogram"], map[string]any{"500": float64(1)}) {
+				t.Errorf("GET /posts second histogram = %v, want {500: 1}", s["histogram"])
+			}
+		case "GET /new":
+			if !reflect.DeepEqual(s["histogram"], map[string]any{"50": float64(1)}) {
+				t.Errorf("GET /new second histogram = %v, want {50: 1}", s["histogram"])
+			}
+		}
 	}
 }

@@ -11,6 +11,7 @@ type performanceBucket struct {
 	count         int64
 	durationSumMs float64
 	maxDurationMs float64
+	histogram     map[string]int64
 }
 
 // PerformanceFlusher times requests in-process, bucketed by transaction name (see the net/http
@@ -50,7 +51,7 @@ func (f *PerformanceFlusher) Record(transactionName string, durationMs float64) 
 	defer f.mu.Unlock()
 	bucket, ok := f.buckets[transactionName]
 	if !ok {
-		bucket = &performanceBucket{}
+		bucket = &performanceBucket{histogram: make(map[string]int64)}
 		f.buckets[transactionName] = bucket
 	}
 	bucket.count++
@@ -58,6 +59,9 @@ func (f *PerformanceFlusher) Record(transactionName string, durationMs float64) 
 	if durationMs > bucket.maxDurationMs {
 		bucket.maxDurationMs = durationMs
 	}
+	// The distribution count/sum/max can't reconstruct: see histogramBoundariesMs for why the
+	// server approximates a percentile from these bucket counts.
+	bucket.histogram[bucketFor(durationMs)]++
 }
 
 // Flush snapshots and resets the buffered buckets, then delivers them as one batch. A failed
@@ -96,8 +100,9 @@ func (f *PerformanceFlusher) Flush() {
 			"request_count":     bucket.count,
 			"duration_sum_ms":   bucket.durationSumMs,
 			"max_duration_ms":   bucket.maxDurationMs,
+			"histogram":         copyHistogram(bucket.histogram),
 		})
-		delivered[name] = *bucket
+		delivered[name] = performanceBucket{count: bucket.count, durationSumMs: bucket.durationSumMs, histogram: copyHistogram(bucket.histogram)}
 	}
 	f.mu.Unlock()
 
@@ -113,6 +118,13 @@ func (f *PerformanceFlusher) Flush() {
 		}
 		current.count -= sent.count
 		current.durationSumMs -= sent.durationSumMs
+		for label, count := range sent.histogram {
+			if remaining := current.histogram[label] - count; remaining > 0 {
+				current.histogram[label] = remaining
+			} else {
+				delete(current.histogram, label)
+			}
+		}
 		if current.count <= 0 {
 			delete(f.buckets, name)
 		}
@@ -124,6 +136,14 @@ func (f *PerformanceFlusher) Flush() {
 	}
 	f.periodStart = periodEnd
 	f.mu.Unlock()
+}
+
+func copyHistogram(histogram map[string]int64) map[string]int64 {
+	copied := make(map[string]int64, len(histogram))
+	for label, count := range histogram {
+		copied[label] = count
+	}
+	return copied
 }
 
 func (f *PerformanceFlusher) run() {
