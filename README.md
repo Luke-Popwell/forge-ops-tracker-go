@@ -323,6 +323,32 @@ they're `CaptureErrorCtx`/`RecoverCtx` called with `context.Background()`, which
 attached. `AddBreadcrumb` called on a context nobody ever installed a trail on (no `Middleware`/
 `Recovery`, or `TrackBreadcrumbs` off when they ran) is a well-defined, harmless no-op, not a panic.
 
+## Database errors
+
+A Go error carries no SQL of its own, and no Go database driver puts the statement on its error types, so the code that ran the query hands it over with `forgeops.WithSQL`. Everything downstream (`CaptureError`, `Recover`, the middleware) then finds it with no extra call, and `errors.Is`/`errors.As` on the original error still work through it. The event includes the names of the stored procedure, table and view that SQL touched, so the issue tells you where to start looking. Names are identifiers, never values; the raw statement never leaves the process. A custom error type can also expose the statement itself by implementing `SQLStatement() string`.
+
+To also send the SQL statement itself, opt in. Every string and number is replaced by `?` before it
+leaves your process (`WHERE email = 'a@b.co' AND id = 42` is sent as `WHERE email = ? AND id = ?`),
+and ForgeOps masks it again on arrival:
+
+```go
+rows, err := db.QueryContext(ctx, query, args...)
+if err != nil {
+    return forgeops.WithSQL(err, query)
+}
+
+// Opt in to also sending the masked statement (default false).
+forgeops.Init(func(c *forgeops.Configuration) {
+    c.CaptureSQLStatement = true
+    // c.CaptureSQLObjects = false // default true; false stops even the names
+})
+```
+
+Each ForgeOps project also has its own "Capture the SQL behind database errors" setting. Turn it off
+there and the statement is never stored for that project, whatever this flag says; the names are
+still kept. A view and a table are written the same way in SQL, so both show as tables/views; the
+database's own error message usually settles which it was.
+
 ## Running the tests
 
 ```bash

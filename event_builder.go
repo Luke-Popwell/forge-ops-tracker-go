@@ -89,10 +89,33 @@ func (b *EventBuilder) Build(err error, context map[string]any, user map[string]
 		payload["breadcrumbs"] = breadcrumbs
 	}
 
+	b.attachSQL(payload, err)
+
 	if b.configuration.ScrubPII {
 		payload = b.scrub(payload)
 	}
 	return payload
+}
+
+// See sql_statement.go for what's read off the error and how it's masked. The statement itself
+// only goes out when CaptureSQLStatement is on; the extracted names go out on their own
+// (CaptureSQLObjects) so an issue can still name the procedure or view involved.
+func (b *EventBuilder) attachSQL(payload map[string]any, err error) {
+	if !b.configuration.CaptureSQLObjects && !b.configuration.CaptureSQLStatement {
+		return
+	}
+
+	masked := maskSQL(findSQL(err))
+	if masked == "" {
+		return
+	}
+
+	if objects := extractSQLObjects(masked); objects != nil && b.configuration.CaptureSQLObjects {
+		payload["sql_objects"] = objects
+	}
+	if b.configuration.CaptureSQLStatement {
+		payload["sql_statement"] = masked
+	}
 }
 
 // exception_class/occurred_at/environment/release/server_name/sdk_name/user are left alone:
@@ -112,6 +135,9 @@ func (b *EventBuilder) scrub(payload map[string]any) map[string]any {
 
 	payload["context"] = ScrubValue(payload["context"], "")
 	payload["tags"] = ScrubValue(payload["tags"], "")
+	if statement, ok := payload["sql_statement"].(string); ok {
+		payload["sql_statement"] = ScrubString(statement)
+	}
 
 	// category/level/timestamp are left alone, the same "structured fields this client sets
 	// deliberately, not free text" exemption exception_class/environment/etc. already get above:

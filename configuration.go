@@ -40,6 +40,17 @@ type Configuration struct {
 	// even attempt that disk read in the first place.
 	CaptureSourceContext bool
 
+	// CaptureSQLObjects, when an error carries the SQL behind a failed database call (attached with
+	// WithSQL, or exposed by an error type implementing SQLStatement() string), sends the names of
+	// the stored procedure, table and view that SQL touched, so an issue says where to start
+	// looking. Names are identifiers, never values, which is why this defaults on.
+	// CaptureSQLStatement is the separate, opt-in step of also sending the statement itself, with
+	// every string and number replaced by "?"; off by default because even a masked statement
+	// describes your schema, and ForgeOps' own per-project setting is what durably governs whether
+	// the server stores it. See sql_statement.go.
+	CaptureSQLObjects   bool
+	CaptureSQLStatement bool
+
 	Logger Logger
 
 	// TrackPerformance controls whether the net/http/Gin integrations time every request and
@@ -97,6 +108,7 @@ func NewConfiguration() *Configuration {
 		Timeout:                           2 * time.Second,
 		ScrubPII:                          true,
 		CaptureSourceContext:              true,
+		CaptureSQLObjects:                 true,
 		Logger:                            noopLogger{},
 		TrackPerformance:                  true,
 		MetricFlushInterval:               60 * time.Second,
