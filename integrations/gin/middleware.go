@@ -7,6 +7,7 @@
 package gin
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -22,10 +23,17 @@ import (
 // nethttp.Middleware does: so AddBreadcrumb calls made anywhere inside a later handler, and
 // Timing below's own automatic entry, have somewhere to go, and CaptureErrorCtx below can report
 // whatever trail accumulated first.
+//
+// Also gives the request its trace context (forgeops.WithRequest, with c.FullPath() as its route):
+// the caller's trace when it arrived with a valid traceparent header, a fresh one otherwise. A
+// panic reported here, and any error reported with forgeops.CaptureErrorCtx(c.Request.Context(),
+// ...) in a later handler, carries the request's trace_id, transaction_name (the same
+// "METHOD route" Timing uses) and endpoint ("METHOD /users/:id", left out for a request no route
+// matched).
 func Recovery() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		ctx := forgeops.WithBreadcrumbs(c.Request.Context())
-		c.Request = c.Request.WithContext(ctx)
+		c.Request = withRequest(c, forgeops.WithBreadcrumbs(c.Request.Context()))
+		ctx := c.Request.Context()
 
 		defer func() {
 			if v := recover(); v != nil {
@@ -73,13 +81,24 @@ func Recovery() gin.HandlerFunc {
 // and AddBreadcrumb need to fire during that unwind too, exactly like nethttp.Timing's own deferred
 // version already correctly does, or a panicking request (the one case a breadcrumb trail is
 // actually worth having) would silently never get either.
+//
+// The trace continues the caller's when the request arrived with a valid traceparent header (see
+// forgeops.WithRequest), and is sent when it was slow or when the request errored: an error
+// reported with its context, or a panic passing through here on its way out.
 func Timing() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// A fresh trace on the request's own context: see forgeops.WithTrace. Finished below, once
-		// the root span's own real duration is known.
+		// The request's trace context (a no-op if Recovery already gave it one), then a trace on
+		// it: see forgeops.WithTrace. Finished below, once the root span's own real duration is
+		// known.
+		c.Request = withRequest(c, c.Request.Context())
 		c.Request = c.Request.WithContext(forgeops.WithTrace(c.Request.Context()))
 		start := time.Now()
+		completed := false
 		defer func() {
+			if !completed {
+				// A later handler panicked: only observed here on its way out.
+				forgeops.MarkRequestErrored(c.Request.Context())
+			}
 			duration := time.Since(start)
 			durationMs := float64(duration) / float64(time.Millisecond)
 			route := c.FullPath()
@@ -100,5 +119,15 @@ func Timing() gin.HandlerFunc {
 			})
 		}()
 		c.Next()
+		completed = true
 	}
+}
+
+// withRequest returns c.Request with ctx and the request's trace context (see forgeops.WithRequest),
+// its route set to Gin's matched route pattern: Gin routes before any handler in the chain runs, so
+// c.FullPath() is already known here, and an error reported from the handler itself has it.
+func withRequest(c *gin.Context, ctx context.Context) *http.Request {
+	r := forgeops.WithRequest(c.Request.WithContext(ctx))
+	forgeops.SetRequestRoute(r.Context(), c.FullPath())
+	return r
 }

@@ -15,6 +15,14 @@ func NewReporter(configuration *Configuration, eventBuilder *EventBuilder, deliv
 }
 
 func (r *Reporter) Report(err error, context map[string]any, user map[string]any, pcs []uintptr, breadcrumbs []Breadcrumb) {
+	r.report(err, context, user, pcs, breadcrumbs, traceFields{})
+}
+
+// report is Report plus where the error happened (see traceFieldsForError): trace_id,
+// transaction_name and endpoint, each left out when empty, as all three are outside a request.
+// Added after EventBuilder.Build has scrubbed the payload: structured fields, never PII-scrubbed,
+// the same exemption user gets.
+func (r *Reporter) report(err error, context map[string]any, user map[string]any, pcs []uintptr, breadcrumbs []Breadcrumb, trace traceFields) {
 	defer func() {
 		if p := recover(); p != nil {
 			r.configuration.Logger.Debugf("report failed: %v", p)
@@ -26,5 +34,14 @@ func (r *Reporter) Report(err error, context map[string]any, user map[string]any
 	}
 
 	payload := r.eventBuilder.Build(err, context, user, pcs, breadcrumbs)
+	if trace.transactionName != "" {
+		payload["transaction_name"] = trace.transactionName
+	}
+	if trace.endpoint != "" {
+		payload["endpoint"] = trace.endpoint
+	}
+	if trace.traceID != "" {
+		payload["trace_id"] = trace.traceID
+	}
 	r.deliveryQueue.Push(payload)
 }

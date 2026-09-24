@@ -3,6 +3,7 @@ package forgeops
 import (
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -85,11 +86,30 @@ type Configuration struct {
 	// (see WithTrace) and whether StartSpan/RecordSpan/Transport record anything. On by default, the
 	// same "on unless you turn it off" posture every other tracking mechanism here has; tracing is a
 	// plan-gated feature, enforced server-side, so an org without it just gets a 403 it ignores.
+	// Every request still gets a trace id with this off (see WithRequest): it goes on errors
+	// reported during the request and on the traceparent header Transport adds (see
+	// PropagateTraces), since that id is also what links an error here to one in another service.
 	TrackTracing bool
 	// TraceCaptureThreshold is how long a request's root span must run before its whole trace is
 	// sent at all: the entire point of the feature, not a sampling knob (a fast request costs
-	// nothing over the wire). 1 second, matching gems/forge_ops_tracker's own default.
+	// nothing over the wire). 1 second, matching gems/forge_ops_tracker's own default. A request
+	// that errored sends its trace however fast it was.
 	TraceCaptureThreshold time.Duration
+
+	// PropagateTraces controls whether Transport adds a W3C traceparent header to outbound requests
+	// made inside a request or trace, so the service being called continues this trace. On by
+	// default, matching gems/forge_ops_tracker: the header carries the trace id that links an error
+	// here to an error there, which is useful with or without spans, so it goes out even with
+	// TrackTracing off. A traceparent the request already has is never replaced.
+	PropagateTraces bool
+	// TracePropagationTargets limits which hosts get that header. nil (the default) means every
+	// host. Otherwise each entry is a host string, matching that host and its subdomains on a dot
+	// boundary ("example.com" matches "api.example.com", never "badexample.com"; case and a leading
+	// dot are ignored), or a *regexp.Regexp searched for anywhere in the lowercased host, so anchor
+	// it yourself. Anything else matches nothing, so an empty, non-nil slice propagates nowhere.
+	// Useful for a third-party API that rejects unknown headers, or that shouldn't learn your trace
+	// ids at all.
+	TracePropagationTargets []any
 }
 
 // NewConfiguration returns a Configuration seeded from FORGE_OPS_DSN/FORGE_OPS_ENVIRONMENT/
@@ -118,7 +138,35 @@ func NewConfiguration() *Configuration {
 		MaxBreadcrumbs:                    30,
 		TrackTracing:                      true,
 		TraceCaptureThreshold:             time.Second,
+		PropagateTraces:                   true,
 	}
+}
+
+// ShouldPropagateTrace reports whether an outbound request to host (a hostname, no port) should
+// carry a traceparent header, per PropagateTraces and TracePropagationTargets. Case-insensitive,
+// since hostnames are.
+func (c *Configuration) ShouldPropagateTrace(host string) bool {
+	if !c.PropagateTraces {
+		return false
+	}
+	if c.TracePropagationTargets == nil {
+		return true
+	}
+	host = strings.ToLower(host)
+	for _, target := range c.TracePropagationTargets {
+		switch t := target.(type) {
+		case *regexp.Regexp:
+			if t != nil && t.MatchString(host) {
+				return true
+			}
+		case string:
+			domain := strings.TrimPrefix(strings.ToLower(t), ".")
+			if domain != "" && (host == domain || strings.HasSuffix(host, "."+domain)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func envOrDefault(key, fallback string) string {

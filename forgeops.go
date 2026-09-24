@@ -182,13 +182,18 @@ func CaptureError(err error, context map[string]any, user map[string]any) {
 // leading up to it, not just the error itself. CaptureError above is this with
 // stdcontext.Background(), which never carries a trail, not a second, independent code path: the
 // two stay in sync automatically since one is defined in terms of the other.
+//
+// When ctx belongs to a web request (see WithRequest), the event also says where it happened:
+// trace_id, transaction_name and endpoint, and the request is marked as errored so its trace is
+// sent however fast it was. Inside a WithTrace trace outside any request, only trace_id. RecoverCtx
+// below does the same.
 func CaptureErrorCtx(ctx stdcontext.Context, err error, context map[string]any, user map[string]any) {
 	if err == nil {
 		return
 	}
 	pcs := captureStack()
 	_, r := state()
-	r.Report(err, context, user, pcs, breadcrumbsFromContext(ctx))
+	r.report(err, context, user, pcs, breadcrumbsFromContext(ctx), traceFieldsForError(ctx))
 }
 
 // Recover reports a panic and lets it continue unwinding unchanged. Call it deferred, at the top
@@ -229,7 +234,7 @@ func RecoverCtx(ctx stdcontext.Context, context map[string]any, user map[string]
 	}
 	pcs := captureStack()
 	_, r := state()
-	r.Report(panicError(v), context, user, pcs, breadcrumbsFromContext(ctx))
+	r.report(panicError(v), context, user, pcs, breadcrumbsFromContext(ctx), traceFieldsForError(ctx))
 	panic(v)
 }
 

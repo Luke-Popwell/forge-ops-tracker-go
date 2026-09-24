@@ -2,24 +2,9 @@ package forgeops
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"sync"
 	"time"
 )
-
-// randomHex returns n random bytes as lowercase hex: 16 for a trace id and 8 for a span id, the
-// same sizes gems/forge_ops_tracker's SpanBuffer builds with SecureRandom.hex. The server only
-// needs these unique within one trace, never a real database id, so this is deliberately cheap.
-func randomHex(n int) string {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		// crypto/rand failing is effectively impossible; a constant-length fallback that is still
-		// unique enough within one trace beats panicking inside an error reporter's own tracing.
-		return hex.EncodeToString([]byte(time.Now().Format("150405.000000000")))[:n*2]
-	}
-	return hex.EncodeToString(b)
-}
 
 // SpanBuffer accumulates one request's own nested call tree in-process; the tracing analog to
 // BreadcrumbBuffer's trail. Ported from gems/forge_ops_tracker/lib/forge_ops_tracker/span_buffer.rb
@@ -30,33 +15,48 @@ func randomHex(n int) string {
 // StartSpan), so every branch gets its own correctly scoped view for free, and this type only holds
 // what doesn't depend on that: the trace's identifiers and the flat list of finished spans.
 // Guarded by its own mutex for the same reason BreadcrumbBuffer is.
+//
+// traceID and remoteParentSpanID come from the request's own trace context when there is one (see
+// WithRequest): the caller's ids when the request arrived with a valid traceparent header, so the
+// root span nests under the caller's outgoing span even though the server receives the two in
+// different uploads.
 type SpanBuffer struct {
-	mu             sync.Mutex
-	environment    string
-	release        string
-	traceID        string
-	rootSpanID     string
-	spans          []map[string]any
-	rootDurationMs *float64
+	mu                 sync.Mutex
+	environment        string
+	release            string
+	traceID            string
+	rootSpanID         string
+	remoteParentSpanID string
+	spans              []map[string]any
+	rootDurationMs     *float64
 }
 
-func newSpanBuffer(environment, release string) *SpanBuffer {
+func newSpanBuffer(environment, release, traceID, remoteParentSpanID string) *SpanBuffer {
+	if traceID == "" {
+		traceID = generateTraceID()
+	}
 	return &SpanBuffer{
-		environment: environment,
-		release:     release,
-		traceID:     randomHex(16),
-		rootSpanID:  randomHex(8),
+		environment:        environment,
+		release:            release,
+		traceID:            traceID,
+		rootSpanID:         generateSpanID(),
+		remoteParentSpanID: remoteParentSpanID,
 	}
 }
 
-// record appends one finished span. root is true only for the request's own root span: it forces
-// parent_span_id to nil explicitly rather than reading it off "whatever's currently open".
+// record appends one finished span. root is true only for the request's own root span: its parent
+// is the calling service's span when the trace was continued from one, and nil otherwise, never
+// "whatever's currently open".
 func (b *SpanBuffer) record(spanID, parentSpanID, name, kind string, startedAt time.Time, durationMs float64, data map[string]any, root bool) {
 	if data == nil {
 		data = map[string]any{}
 	}
 	var parent any = parentSpanID
-	if root || parentSpanID == "" {
+	if root {
+		parentSpanID = b.remoteParentSpanID
+		parent = parentSpanID
+	}
+	if parentSpanID == "" {
 		parent = nil
 	}
 	var release any
@@ -120,18 +120,24 @@ func parentSpanFromContext(ctx context.Context, buffer *SpanBuffer) string {
 	return buffer.rootSpanID
 }
 
-// WithTrace returns a copy of ctx carrying a fresh trace (a new trace id and root span id) that
-// StartSpan and RecordSpan attach to, and that FinishTrace later decides whether to send. The
-// net/http and Gin Timing middlewares call this on the request's own context, so most host apps
-// never call it themselves; call it directly for work that isn't an HTTP request (a queue
-// consumer, a cron job). A no-op returning ctx unchanged when Configuration.TrackTracing is off or
-// reporting isn't enabled for this environment, so every later call becomes a no-op too.
+// WithTrace returns a copy of ctx carrying a trace that StartSpan and RecordSpan attach to, and
+// that FinishTrace later decides whether to send. When ctx carries a request's trace context (see
+// WithRequest) the trace uses its trace id, and its root span is parented under the calling
+// service's span if there was one; otherwise it gets a fresh trace id. The net/http and Gin Timing
+// middlewares call this on the request's own context, so most host apps never call it themselves;
+// call it directly for work that isn't an HTTP request (a queue consumer, a cron job). A no-op
+// returning ctx unchanged when Configuration.TrackTracing is off or reporting isn't enabled for
+// this environment, so every later call becomes a no-op too.
 func WithTrace(ctx context.Context) context.Context {
 	config, _ := state()
 	if !config.TrackTracing || !config.IsEnabled() {
 		return ctx
 	}
-	buffer := newSpanBuffer(config.Environment, config.Release)
+	var traceID, remoteParentSpanID string
+	if request := requestFromContext(ctx); request != nil {
+		traceID, remoteParentSpanID = request.traceID, request.parentSpanID
+	}
+	buffer := newSpanBuffer(config.Environment, config.Release, traceID, remoteParentSpanID)
 	ctx = context.WithValue(ctx, traceContextKey{}, buffer)
 	return context.WithValue(ctx, parentSpanContextKey{}, buffer.rootSpanID)
 }
@@ -154,7 +160,7 @@ func StartSpan(ctx context.Context, name, kind string, data map[string]any) (con
 	if kind == "" {
 		kind = "service"
 	}
-	spanID := randomHex(8)
+	spanID := generateSpanID()
 	parent := parentSpanFromContext(ctx, buffer)
 	startedAt := time.Now()
 	ctx = context.WithValue(ctx, parentSpanContextKey{}, spanID)
@@ -175,15 +181,18 @@ func RecordSpan(ctx context.Context, name, kind string, startedAt time.Time, dur
 	if buffer == nil {
 		return
 	}
-	buffer.record(randomHex(8), parentSpanFromContext(ctx, buffer), name, kind, startedAt, float64(duration)/float64(time.Millisecond), data, false)
+	buffer.record(generateSpanID(), parentSpanFromContext(ctx, buffer), name, kind, startedAt, float64(duration)/float64(time.Millisecond), data, false)
 }
 
 // FinishTrace records the request's own root span (kind "controller") once its real total
 // duration is finally known, then, only now and entirely client-side, decides whether the whole
 // trace reached Configuration.TraceCaptureThreshold and is worth sending at all: a normal, fast
 // request's buffer is simply dropped here, unsent, the entire reason this feature costs a fast
-// request nothing over the wire. Mirrors gems/forge_ops_tracker's SpanTracing middleware's own
-// ensure block. Called by the Timing middlewares; a no-op when ctx carries no trace.
+// request nothing over the wire. A request that errored (an error reported with its context, or a
+// panic an integration saw pass through; see MarkRequestErrored) is sent however fast it was,
+// since what led up to an error is exactly what an issue page wants to show next to it. Mirrors
+// gems/forge_ops_tracker's SpanTracing middleware's own ensure block. Called by the Timing
+// middlewares; a no-op when ctx carries no trace.
 func FinishTrace(ctx context.Context, name string, startedAt time.Time, duration time.Duration) {
 	buffer := traceFromContext(ctx)
 	if buffer == nil {
@@ -191,7 +200,7 @@ func FinishTrace(ctx context.Context, name string, startedAt time.Time, duration
 	}
 	config, queue := spanState()
 	buffer.record(buffer.rootSpanID, "", name, "controller", startedAt, float64(duration)/float64(time.Millisecond), nil, true)
-	if buffer.isSlow(float64(config.TraceCaptureThreshold) / float64(time.Millisecond)) {
+	if buffer.isSlow(float64(config.TraceCaptureThreshold)/float64(time.Millisecond)) || requestErrored(ctx) {
 		queue.Push(map[string]any{"trace_id": buffer.traceID, "spans": buffer.snapshot()})
 	}
 }

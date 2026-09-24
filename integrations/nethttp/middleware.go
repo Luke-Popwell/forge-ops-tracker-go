@@ -20,10 +20,16 @@ import (
 // request's own context first (forgeops.WithBreadcrumbs), so AddBreadcrumb calls made anywhere
 // inside next, and Timing below's own automatic entry, actually have somewhere to go; reports via
 // RecoverCtx rather than Recover so a panic here carries whatever trail accumulated first.
+//
+// Also gives the request its trace context (forgeops.WithRequest): the caller's trace when it
+// arrived with a valid traceparent header, a fresh one otherwise. A panic reported here, and any
+// error reported with forgeops.CaptureErrorCtx(r.Context(), ...) inside next, carries the
+// request's trace_id, transaction_name ("METHOD path", the same name Timing uses) and endpoint (the
+// ServeMux route pattern that matched, on Go 1.22+; left out otherwise, never the literal path).
 func Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := forgeops.WithBreadcrumbs(r.Context())
-		r = r.WithContext(ctx)
+		r = forgeops.WithRequest(r.WithContext(forgeops.WithBreadcrumbs(r.Context())))
+		ctx := r.Context()
 
 		defer forgeops.RecoverCtx(ctx, map[string]any{
 			"url":    r.URL.String(),
@@ -58,15 +64,27 @@ func Middleware(next http.Handler) http.Handler {
 // forgeops.WithBreadcrumbs; running Timing without Middleware, an unusual but real configuration
 // for a host app that wants timing without panic recovery, just makes this one particular
 // breadcrumb a no-op along with everything else, not an error.
+//
+// The trace continues the caller's when the request arrived with a valid traceparent header (see
+// forgeops.WithRequest), and is sent when it was slow or when the request errored: an error
+// reported with its context, or a panic passing through here on its way out.
 func Timing(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		// A fresh trace on the request's own context, so StartSpan/RecordSpan/forgeops.Transport
-		// calls made anywhere inside next attach to it: see forgeops.WithTrace. Finished below,
+		// The request's trace context first (a no-op if Middleware already gave it one), then a
+		// trace on it, so StartSpan/RecordSpan/forgeops.Transport calls made anywhere inside next
+		// attach to it: see forgeops.WithTrace. The second WithRequest call only remembers the
+		// final request, the one the router will record its matched pattern on. Finished below,
 		// once the root span's own real duration is known.
-		r = r.WithContext(forgeops.WithTrace(r.Context()))
+		r = forgeops.WithRequest(r)
+		r = forgeops.WithRequest(r.WithContext(forgeops.WithTrace(r.Context())))
 		start := time.Now()
+		completed := false
 		defer func() {
+			if !completed {
+				// next panicked: only observed here on its way out, never recovered.
+				forgeops.MarkRequestErrored(r.Context())
+			}
 			duration := time.Since(start)
 			durationMs := float64(duration) / float64(time.Millisecond)
 			forgeops.RecordPerformance(r.Method+" "+r.URL.Path, durationMs)
@@ -82,6 +100,7 @@ func Timing(next http.Handler) http.Handler {
 			})
 		}()
 		next.ServeHTTP(recorder, r)
+		completed = true
 	})
 }
 

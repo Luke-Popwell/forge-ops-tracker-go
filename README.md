@@ -157,11 +157,12 @@ forgeops.Init(func(c *forgeops.Configuration) {
 ## Distributed tracing
 
 Each request gets its own trace: a root span for the request plus a tree of spans nested under it
-(service work you wrap yourself, outbound HTTP calls, anything else you record). **Only a slow
-request's trace is ever sent**: once the request finishes and its real duration is known, the whole
-trace goes out only if it reached `TraceCaptureThreshold` (1 second by default); a fast request's
-spans are dropped, so it costs nothing over the wire. On by default; turn it off with
-`TrackTracing = false`.
+(service work you wrap yourself, outbound HTTP calls, anything else you record). **Only a slow or
+errored request's trace is ever sent**: once the request finishes and its real duration is known,
+the whole trace goes out if it reached `TraceCaptureThreshold` (1 second by default) or the request
+errored; a fast, successful request's spans are dropped, so it costs nothing over the wire. On by
+default; turn span reporting off with `TrackTracing = false`. A trace follows a request across
+services; see "Following a request across services" below.
 
 The `nethttp.Timing` and `gin.Timing` middlewares open the trace on the request's own context and
 finish it for you (the root span is named like the performance transaction: the matched route
@@ -194,6 +195,70 @@ the start and `forgeops.FinishTrace(ctx, name, startedAt, duration)` at the end 
 
 Delivery is on its own small goroutine and bounded queue (one trace per POST to `/spans`), so
 reporting a slow request never makes it slower; a full queue drops the trace rather than blocking.
+
+### Following a request across services
+
+Traces use the [W3C Trace Context](https://www.w3.org/TR/trace-context/) standard (a `traceparent`
+header), so an error or a slow request can be followed from one service into the next.
+
+**Incoming, automatic**: `nethttp.Middleware`, `nethttp.Timing`, `gin.Recovery` and `gin.Timing`
+give every request a trace id on its context (`forgeops.WithRequest`). A request that arrives with a
+valid `traceparent` header continues that trace: same trace id, and its root span nests under the
+caller's span. A missing or malformed header just starts a new trace. `forgeops.TraceID(ctx)`
+returns the id for your own logs.
+
+**Where an error happened**: an error reported with the request's context (a panic the middleware
+recovers, or your own `forgeops.CaptureErrorCtx(r.Context(), err, ...)`) carries:
+
+- `trace_id`: the request's trace id.
+- `transaction_name`: the same name performance samples and the root span use.
+- `endpoint`: the HTTP method plus the matched route template, never the literal path, so no ids or
+  tokens: Gin's route (`GET /orders/:id`), or the `http.ServeMux` pattern that matched
+  (`GET /orders/{id}`, Go 1.22+ with its new routing on, the default for a module declaring go 1.22
+  or later). Left out when no route is known. With another router, call
+  `forgeops.SetRequestRoute(r.Context(), pattern)` from your own middleware (chi:
+  `chi.RouteContext(r.Context()).RoutePattern()`).
+
+These are read when the error is reported, so one reported from inside a handler already has its
+route. An errored request's trace is always sent, however fast it was (a panic passing through
+`Timing` counts too). Errors reported with a context outside any request are unchanged, apart from
+`trace_id` inside a `WithTrace` trace. The trace id exists even with `TrackTracing = false`, since it
+is also what links errors across services; only span reporting stops.
+
+**Outgoing**: a call made through `forgeops.Transport` with the request's context carries a
+`traceparent` header whose parent id is that call's own `http` span, so the next service's spans
+nest under it:
+
+```go
+client := &http.Client{Transport: forgeops.Transport(nil)}
+
+func checkout(w http.ResponseWriter, r *http.Request) {
+    req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, "https://payments.internal/charge", nil)
+    resp, err := client.Do(req) // sends traceparent: 00-<this request's trace id>-<this call's span id>-01
+    // ...
+}
+```
+
+The header goes on a clone (the request you pass in is never modified); a `traceparent` you set
+yourself is left alone, and this client's own requests to ForgeOps never carry one. The service on
+the other end must also report to ForgeOps, and both projects must be linked in ForgeOps to see
+their errors connected.
+
+Narrow or turn off where the header goes, for example if a third-party API rejects unknown headers:
+
+```go
+forgeops.Init(func(c *forgeops.Configuration) {
+    c.PropagateTraces = false // never send traceparent (default true)
+
+    // Default nil: every host. A string matches that host and its subdomains on a dot boundary
+    // ("example.com" matches "api.example.com", not "badexample.com"); a *regexp.Regexp is
+    // searched for in the host, so anchor it yourself. An empty, non-nil slice matches nothing.
+    c.TracePropagationTargets = []any{"internal.example", regexp.MustCompile(`^10\.0\.`)}
+})
+```
+
+For work that isn't an HTTP request (a queue consumer, a cron job), `forgeops.WithTrace(ctx)` starts
+a trace whose id errors reported with that context carry, and that `Transport` propagates.
 
 ## Source context
 
