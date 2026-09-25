@@ -1,5 +1,5 @@
-github.com/Luke-Popwell/forge-ops-tracker-go v0.5.0 h1:o6+i9cV74XG4Xjj6h1RBpBRiKMltYsdJs8DBrF/3quw=
-github.com/Luke-Popwell/forge-ops-tracker-go v0.5.0/go.mod h1:ApWZadLCetRcuja3H9wytJTLBQhxe/BAPC5lTd/8RcU=
+github.com/Luke-Popwell/forge-ops-tracker-go v0.6.0 h1:SA27KGqO+upHEy+XxoWI0CNjjBF6R15AXQ9DLuSssI4=
+github.com/Luke-Popwell/forge-ops-tracker-go v0.6.0/go.mod h1:ApWZadLCetRcuja3H9wytJTLBQhxe/BAPC5lTd/8RcU=
 github.com/bytedance/sonic v1.11.6 h1:oUp34TzMlL+OY1OUWxHqsdkgC/Zfc85zGqw9siXjrc0=
 github.com/bytedance/sonic v1.11.6/go.mod h1:LysEHSvpvDySVdC2f87zGWf6CIKJcAvqab1ZaiQtds4=
 github.com/bytedance/sonic/loader v0.1.1 h1:c+e5Pt1k/cy5wMveRDyk2X4B9hF4g7an8N3zCYjJFNM=
