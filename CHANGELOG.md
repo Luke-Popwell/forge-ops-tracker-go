@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.0 (2026-09-25)
+
+- A database span can now carry the SQL it ran. New `forgeops.StartDatabaseSpan(ctx, name, statement, dbSystem)` and `forgeops.RecordDatabaseSpan(ctx, name, statement, dbSystem, startedAt, duration)` record a `database` span whose data holds the statement as `db.statement` and the database name, lowercased, as `db.system` (`DatabaseSpanData(statement, dbSystem)` builds that map for `StartSpan`/`RecordSpan`). The statement is masked (every string and number becomes `?`) and cut to 4000 characters when the span is recorded, and a `db.statement` in any `database` span's data is masked the same way, so the SQL as written never leaves the process. Query arguments are never taken.
+- The Gin integration needs no update and keeps requiring v0.6.0 of this module; it uses none of the above.
+
 ## 0.6.0 (2026-09-25)
 
 - New `forgeops.RecordChange(kind, title, options)` records a change that isn't a deploy (a feature flag, a config edit, a migration, a dependency or infrastructure change) so it shows up alongside errors and performance data. `kind` is one of the new `ChangeKind*` constants, anything else being sent as `other`; `ChangeOptions` carries the optional `Details`, `Environment` (defaulting to `Configuration.Environment`), `Service`, `Actor`, `URL`, `ID` (an idempotency key) and `OccurredAt` (defaulting to now). Delivered on the existing background delivery goroutine; never blocks, never panics, and is a no-op when the client isn't enabled.

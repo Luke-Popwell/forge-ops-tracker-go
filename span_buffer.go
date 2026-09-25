@@ -2,6 +2,7 @@ package forgeops
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 )
@@ -50,6 +51,9 @@ func newSpanBuffer(environment, release, traceID, remoteParentSpanID string) *Sp
 func (b *SpanBuffer) record(spanID, parentSpanID, name, kind string, startedAt time.Time, durationMs float64, data map[string]any, root bool) {
 	if data == nil {
 		data = map[string]any{}
+	}
+	if normalizeKind(kind) == "database" {
+		data = maskDatabaseSpanData(data)
 	}
 	var parent any = parentSpanID
 	if root {
@@ -182,6 +186,60 @@ func RecordSpan(ctx context.Context, name, kind string, startedAt time.Time, dur
 		return
 	}
 	buffer.record(generateSpanID(), parentSpanFromContext(ctx, buffer), name, kind, startedAt, float64(duration)/float64(time.Millisecond), data, false)
+}
+
+// DatabaseSpanData is the data for a "database" span that carries the SQL it ran: statement
+// becomes "db.statement" and dbSystem ("postgresql", "mysql", "sqlite", "mssql", "oracle", or any
+// other name), lowercased, becomes "db.system". Either is left out when empty. The statement is
+// masked (every string and number replaced by "?") and cut to 4000 characters when the span is
+// recorded, never sent as written; bind values are never taken at all. Add your own keys to the
+// returned map if you like. StartDatabaseSpan and RecordDatabaseSpan below build it for you.
+func DatabaseSpanData(statement, dbSystem string) map[string]any {
+	data := map[string]any{}
+	if strings.TrimSpace(statement) != "" {
+		data["db.statement"] = statement
+	}
+	if system := strings.ToLower(strings.TrimSpace(dbSystem)); system != "" {
+		data["db.system"] = system
+	}
+	return data
+}
+
+// StartDatabaseSpan is StartSpan for a database query, carrying the query's SQL (masked; see
+// DatabaseSpanData) so ForgeOps can show which statement a slow request spent its time in:
+//
+//	ctx, end := forgeops.StartDatabaseSpan(ctx, "load orders", query, "postgresql")
+//	rows, err := db.QueryContext(ctx, query, customerID)
+//	end()
+func StartDatabaseSpan(ctx context.Context, name, statement, dbSystem string) (context.Context, func()) {
+	return StartSpan(ctx, name, "database", DatabaseSpanData(statement, dbSystem))
+}
+
+// RecordDatabaseSpan is RecordSpan for a query you timed yourself, carrying its SQL (masked; see
+// DatabaseSpanData). A no-op when ctx carries no trace.
+func RecordDatabaseSpan(ctx context.Context, name, statement, dbSystem string, startedAt time.Time, duration time.Duration) {
+	RecordSpan(ctx, name, "database", startedAt, duration, DatabaseSpanData(statement, dbSystem))
+}
+
+// maskDatabaseSpanData returns a copy of a database span's data with "db.statement" masked, so the
+// SQL is masked however it got there (DatabaseSpanData, or a map built by hand). A statement that
+// isn't a string, or is blank, is dropped rather than sent. The caller's map is never modified.
+func maskDatabaseSpanData(data map[string]any) map[string]any {
+	raw, present := data["db.statement"]
+	if !present {
+		return data
+	}
+	out := make(map[string]any, len(data))
+	for key, value := range data {
+		out[key] = value
+	}
+	delete(out, "db.statement")
+	if statement, ok := raw.(string); ok {
+		if masked := maskSQL(statement); masked != "" {
+			out["db.statement"] = masked
+		}
+	}
+	return out
 }
 
 // FinishTrace records the request's own root span (kind "controller") once its real total

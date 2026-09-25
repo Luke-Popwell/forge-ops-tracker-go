@@ -193,6 +193,65 @@ resp, err := client.Do(req)
 For work that isn't an HTTP request (a queue consumer, a cron job), call `forgeops.WithTrace(ctx)` at
 the start and `forgeops.FinishTrace(ctx, name, startedAt, duration)` at the end yourself.
 
+Database queries aren't recorded automatically (this client doesn't wrap `database/sql` or any
+driver), so wrap a query yourself as a `database` span. Pass its SQL and ForgeOps shows which
+statement a slow request spent its time in:
+
+```go
+package main
+
+import (
+	"database/sql"
+	"encoding/json"
+	"net/http"
+
+	forgeops "github.com/Luke-Popwell/forge-ops-tracker-go"
+	"github.com/Luke-Popwell/forge-ops-tracker-go/integrations/nethttp"
+	_ "github.com/lib/pq"
+)
+
+const openOrders = "SELECT id, total FROM orders WHERE customer_id = $1 AND status = 'open'"
+
+func main() {
+	forgeops.Init(nil)
+	db, err := sql.Open("postgres", "postgres://localhost/shop?sslmode=disable")
+	if err != nil {
+		panic(err)
+	}
+
+	http.Handle("/orders", nethttp.Timing(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, end := forgeops.StartDatabaseSpan(r.Context(), "load open orders", openOrders, "postgresql")
+		rows, err := db.QueryContext(ctx, openOrders, r.URL.Query().Get("customer"))
+		end()
+		if err != nil {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		defer rows.Close()
+		var ids []int64
+		for rows.Next() {
+			var id int64
+			var total float64
+			if rows.Scan(&id, &total) == nil {
+				ids = append(ids, id)
+			}
+		}
+		_ = json.NewEncoder(w).Encode(ids)
+	})))
+	_ = http.ListenAndServe(":8080", nil)
+}
+```
+
+The statement is masked when the span is recorded: every string and number becomes `?`, so this span
+carries `SELECT id, total FROM orders WHERE customer_id = $1 AND status = ?`, and ForgeOps masks it
+again on arrival. It's cut to 4000 characters, and the query's arguments are never taken. It goes
+out in the span's data as `db.statement`, and the database name (`"postgresql"`, `"mysql"`,
+`"sqlite"`, `"mssql"`, `"oracle"`, or any other; optional, lowercased) as `db.system`. For a query
+you timed yourself, `forgeops.RecordDatabaseSpan(ctx, name, statement, dbSystem, startedAt,
+duration)` does the same as `RecordSpan`, and `forgeops.DatabaseSpanData(statement, dbSystem)` builds
+the data map if you'd rather call `StartSpan` directly. A `db.statement` in any `database` span's
+data is masked the same way, however the map was built.
+
 Delivery is on its own small goroutine and bounded queue (one trace per POST to `/spans`), so
 reporting a slow request never makes it slower; a full queue drops the trace rather than blocking.
 
