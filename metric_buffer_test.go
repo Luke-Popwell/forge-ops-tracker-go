@@ -152,6 +152,7 @@ func TestCaptureMetricAndCaptureInfrastructureMetricDeliverToTheirOwnEndpointsEn
 	resetForTesting()
 	defer resetForTesting()
 	Init(func(c *Configuration) {
+		c.DetectChanges = false
 		c.DSN = "http://key@" + server.Listener.Addr().String() + "/api/v1/events"
 		c.Environment = "production"
 		c.Release = "a1b2c3d"
@@ -186,6 +187,7 @@ func TestCaptureMetricIsANoOpWhenTheClientIsNotEnabled(t *testing.T) {
 	resetForTesting()
 	defer resetForTesting()
 	Init(func(c *Configuration) {
+		c.DetectChanges = false
 		c.DSN = "https://key@tracker.example.com/api/v1/events"
 		c.Environment = "development"
 	})

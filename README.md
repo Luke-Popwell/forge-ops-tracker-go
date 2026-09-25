@@ -414,6 +414,51 @@ there and the statement is never stored for that project, whatever this flag say
 still kept. A view and a table are written the same way in SQL, so both show as tables/views; the
 database's own error message usually settles which it was.
 
+## Recording changes
+
+ForgeOps already knows when you deploy. `RecordChange` tells it about everything else that changes
+behavior without a deploy, so it shows up next to your errors and performance data:
+
+```go
+forgeops.RecordChange(forgeops.ChangeKindFeatureFlag, "Enabled new checkout", &forgeops.ChangeOptions{
+    Details: map[string]any{"flag": "new_checkout", "enabled": true},
+    Actor:   "luke",
+    URL:     "https://github.com/acme/shop/pull/123", // optional link to more
+})
+
+forgeops.RecordChange(forgeops.ChangeKindMigration, "Added orders.shipped_at", nil)
+```
+
+The kind is one of `ChangeKindFeatureFlag`, `ChangeKindConfig`, `ChangeKindMigration`,
+`ChangeKindDependency`, `ChangeKindInfrastructure` or `ChangeKindOther`; anything else is sent as
+`other`. `ChangeOptions` also takes `Environment` (defaults to `Configuration.Environment`),
+`Service`, `ID` (an idempotency key: the same `ID` twice records one change) and `OccurredAt`
+(defaults to now); pass `nil` for none. The title is required and kept to 200 characters. It's
+delivered on the same background goroutine as errors, never blocks or panics, and is a no-op when
+the client isn't enabled for the environment.
+
+### Detecting changes at startup
+
+The first `Init` that enables the client also sends one snapshot, in the background, of what this
+process is running: the Go version and every module version compiled into the binary (read from
+its own build info, so exactly what's deployed). ForgeOps compares it with the last snapshot for the
+same environment and records what changed, such as a dependency upgrade, without you calling
+anything.
+
+```go
+forgeops.Init(func(c *forgeops.Configuration) {
+    c.DetectChanges = false   // default true: turns the startup snapshot off
+    c.TrackEnvVarNames = true // default false: also send environment variable NAMES
+})
+```
+
+With `TrackEnvVarNames` on, the snapshot includes the names (never the values) of this process's
+environment variables, so one added or removed between deploys shows up too. Names that differ from
+host to host (`HOSTNAME`, `PATH`, `HOME`, `LC_*`, `KUBERNETES_*`, Kubernetes' `*_SERVICE_HOST`
+style service variables and similar) and this client's own `FORGE_OPS_*` variables are left out,
+so a fleet of identical hosts doesn't look like it's changing. Both need a ForgeOps plan that
+includes change tracking; on one that doesn't, they are rejected server-side and dropped silently.
+
 ## Running the tests
 
 ```bash

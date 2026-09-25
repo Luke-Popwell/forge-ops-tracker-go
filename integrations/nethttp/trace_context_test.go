@@ -52,6 +52,7 @@ func TestTraceContextThroughMiddlewareAndTiming(t *testing.T) {
 	defer downstream.Close()
 
 	forgeops.Init(func(c *forgeops.Configuration) {
+		c.DetectChanges = false
 		c.DSN = "http://key@" + tracker.Listener.Addr().String() + "/api/v1/events"
 		c.Environment = "production"
 		c.Timeout = time.Second

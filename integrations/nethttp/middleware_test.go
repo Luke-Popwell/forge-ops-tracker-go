@@ -25,6 +25,7 @@ func TestMiddlewareReportsThenRepanics(t *testing.T) {
 	defer trackerServer.Close()
 
 	forgeops.Init(func(c *forgeops.Configuration) {
+		c.DetectChanges = false
 		c.DSN = "http://key@" + trackerServer.Listener.Addr().String() + "/events"
 		c.Environment = "production"
 		c.Timeout = time.Second
@@ -139,6 +140,7 @@ func TestBreadcrumbsAndTiming(t *testing.T) {
 	defer trackerServer.Close()
 
 	forgeops.Init(func(c *forgeops.Configuration) {
+		c.DetectChanges = false
 		c.DSN = "http://key@" + trackerServer.Listener.Addr().String() + "/events"
 		c.Environment = "production"
 		c.Timeout = time.Second
@@ -242,6 +244,7 @@ func TestTimingOpensATraceAndSendsASlowRequestsSpans(t *testing.T) {
 	defer tracker.Close()
 
 	forgeops.Init(func(c *forgeops.Configuration) {
+		c.DetectChanges = false
 		c.DSN = "http://key@" + tracker.Listener.Addr().String() + "/api/v1/events"
 		c.Environment = "production"
 		c.Timeout = time.Second

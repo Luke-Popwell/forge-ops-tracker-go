@@ -143,11 +143,15 @@ func ensureConfigurationLocked() {
 // Init configures the client. Call once at startup, before http.ListenAndServe or right after
 // building your router. Pass a closure to set any Configuration field: the same builder-block
 // shape the Java and .NET clients use for the same purpose.
+//
+// The first Init that leaves the client enabled also sends one change snapshot in the background
+// (see Configuration.DetectChanges), never delaying Init itself.
 func Init(configure func(*Configuration)) *Configuration {
-	config, _ := state()
+	config, r := state()
 	if configure != nil {
 		configure(config)
 	}
+	sendChangeSnapshotOnce(config, r)
 	return config
 }
 
@@ -292,4 +296,7 @@ func resetForTesting() {
 	spanQueue = nil
 	metricBuffer = nil
 	infraBuffer = nil
+	changeSnapshotMu.Lock()
+	changeSnapshotSent = false
+	changeSnapshotMu.Unlock()
 }

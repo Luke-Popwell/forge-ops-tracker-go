@@ -110,6 +110,17 @@ type Configuration struct {
 	// Useful for a third-party API that rejects unknown headers, or that shouldn't learn your trace
 	// ids at all.
 	TracePropagationTargets []any
+
+	// DetectChanges controls whether Init sends one change snapshot per process (the Go version and
+	// the module versions compiled into this binary; see change_tracking.go) so ForgeOps can record
+	// what changed since the last deploy. On by default, the same "on unless you turn it off"
+	// posture as every other tracking mechanism here. RecordChange works regardless of this flag.
+	DetectChanges bool
+	// TrackEnvVarNames adds the NAMES (never the values) of this process's environment variables to
+	// that snapshot, minus host-specific noise like HOSTNAME or PATH, so a variable added or removed
+	// between deploys shows up as a change. Off by default: even a variable's name can say more
+	// about your setup than you want to send.
+	TrackEnvVarNames bool
 }
 
 // NewConfiguration returns a Configuration seeded from FORGE_OPS_DSN/FORGE_OPS_ENVIRONMENT/
@@ -139,6 +150,7 @@ func NewConfiguration() *Configuration {
 		TrackTracing:                      true,
 		TraceCaptureThreshold:             time.Second,
 		PropagateTraces:                   true,
+		DetectChanges:                     true,
 	}
 }
 
@@ -244,6 +256,17 @@ func (c *Configuration) swapEventsSuffix(replacement string) string {
 		return strings.TrimSuffix(uri, suffix) + replacement
 	}
 	return uri
+}
+
+// ChangesURI returns the same ingestion URL with the trailing "/events" swapped for "/changes".
+func (c *Configuration) ChangesURI() string {
+	return c.swapEventsSuffix("/changes")
+}
+
+// ChangeSnapshotsURI returns the same ingestion URL with the trailing "/events" swapped for
+// "/change_snapshots".
+func (c *Configuration) ChangeSnapshotsURI() string {
+	return c.swapEventsSuffix("/change_snapshots")
 }
 
 // SpansURI returns the same ingestion URL with the trailing "/events" swapped for "/spans": one

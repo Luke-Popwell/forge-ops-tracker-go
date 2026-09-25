@@ -81,6 +81,7 @@ func TestWithBreadcrumbsAttachesAnEmptyTrail(t *testing.T) {
 	resetForTesting()
 	t.Cleanup(resetForTesting)
 	Init(func(c *Configuration) {
+		c.DetectChanges = false
 		c.TrackBreadcrumbs = true
 		c.DSN = "https://key@forgeops.example/events"
 		c.Environment = "production"
@@ -101,6 +102,7 @@ func TestWithBreadcrumbsIsANoOpWhenTrackingIsOff(t *testing.T) {
 	resetForTesting()
 	t.Cleanup(resetForTesting)
 	Init(func(c *Configuration) {
+		c.DetectChanges = false
 		c.TrackBreadcrumbs = false
 		c.DSN = "https://key@forgeops.example/events"
 		c.Environment = "production"
@@ -140,6 +142,7 @@ func TestCaptureErrorCtxDeliversTheAccumulatedTrail(t *testing.T) {
 		resetForTesting()
 	})
 	Init(func(c *Configuration) {
+		c.DetectChanges = false
 		c.DSN = "http://key@" + server.Listener.Addr().String() + "/events"
 		c.Environment = "production"
 		c.Timeout = time.Second
@@ -183,6 +186,7 @@ func TestCaptureErrorWithoutCtxNeverAttachesBreadcrumbs(t *testing.T) {
 		resetForTesting()
 	})
 	Init(func(c *Configuration) {
+		c.DetectChanges = false
 		c.DSN = "http://key@" + server.Listener.Addr().String() + "/events"
 		c.Environment = "production"
 		c.Timeout = time.Second

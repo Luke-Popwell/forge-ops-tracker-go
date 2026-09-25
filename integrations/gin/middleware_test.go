@@ -18,7 +18,10 @@ import (
 func TestRecoveryReportsThenSends500(t *testing.T) {
 	var received int32
 	trackerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&received, 1)
+		// Only events: the core module's startup change snapshot also lands on this server.
+		if r.URL.Path == "/events" {
+			atomic.AddInt32(&received, 1)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer trackerServer.Close()

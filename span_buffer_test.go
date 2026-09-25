@@ -65,6 +65,7 @@ func initTracing(t *testing.T, server *spansServer, configure func(*Configuratio
 	resetForTesting()
 	t.Cleanup(resetForTesting)
 	Init(func(c *Configuration) {
+		c.DetectChanges = false
 		c.DSN = "http://key@" + server.Listener.Addr().String() + "/api/v1/events"
 		c.Environment = "production"
 		c.Release = "1.2.3"

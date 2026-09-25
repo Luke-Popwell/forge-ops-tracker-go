@@ -18,8 +18,16 @@ import "sync"
 type DeliveryQueue struct {
 	configuration *Configuration
 	client        *Client
-	queue         chan map[string]any
+	queue         chan queuedDelivery
 	once          sync.Once
+}
+
+// queuedDelivery is one payload plus the Client method that sends it: an event goes to
+// Client.Deliver, while a change or change snapshot (see change_tracking.go) goes to its own
+// endpoint through the same worker, so none of them ever needs a goroutine of its own.
+type queuedDelivery struct {
+	payload map[string]any
+	deliver func(map[string]any) bool
 }
 
 func NewDeliveryQueue(configuration *Configuration, client *Client) *DeliveryQueue {
@@ -30,17 +38,26 @@ func NewDeliveryQueue(configuration *Configuration, client *Client) *DeliveryQue
 	return &DeliveryQueue{
 		configuration: configuration,
 		client:        client,
-		queue:         make(chan map[string]any, size),
+		queue:         make(chan queuedDelivery, size),
 	}
 }
 
 // Push enqueues payload for delivery, returning false (and dropping it) if the queue is already
 // full rather than blocking the caller.
 func (q *DeliveryQueue) Push(payload map[string]any) bool {
+	return q.push(queuedDelivery{payload: payload, deliver: q.client.Deliver})
+}
+
+// pushTo is Push for a payload that goes somewhere other than the events endpoint.
+func (q *DeliveryQueue) pushTo(deliver func(map[string]any) bool, payload map[string]any) bool {
+	return q.push(queuedDelivery{payload: payload, deliver: deliver})
+}
+
+func (q *DeliveryQueue) push(item queuedDelivery) bool {
 	q.once.Do(func() { go q.run() })
 
 	select {
-	case q.queue <- payload:
+	case q.queue <- item:
 		return true
 	default:
 		q.configuration.Logger.Debugf("delivery queue full, dropping event")
@@ -49,19 +66,19 @@ func (q *DeliveryQueue) Push(payload map[string]any) bool {
 }
 
 func (q *DeliveryQueue) run() {
-	for payload := range q.queue {
-		q.deliverSafely(payload)
+	for item := range q.queue {
+		q.deliverSafely(item)
 	}
 }
 
 // deliverSafely guards a single delivery, not the whole loop: one bad delivery must not kill the
 // worker for every event after it. Client.Deliver already turns every failure mode of its own into
 // a plain false return rather than a panic; this is a second, redundant layer of safety around it.
-func (q *DeliveryQueue) deliverSafely(payload map[string]any) {
+func (q *DeliveryQueue) deliverSafely(item queuedDelivery) {
 	defer func() {
 		if r := recover(); r != nil {
 			q.configuration.Logger.Debugf("delivery worker error: %v", r)
 		}
 	}()
-	q.client.Deliver(payload)
+	item.deliver(item.payload)
 }

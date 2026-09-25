@@ -94,6 +94,7 @@ func initTracker(t *testing.T, server *trackerServer, configure func(*Configurat
 	resetForTesting()
 	t.Cleanup(resetForTesting)
 	Init(func(c *Configuration) {
+		c.DetectChanges = false
 		c.DSN = "http://key@" + server.Listener.Addr().String() + "/api/v1/events"
 		c.Environment = "production"
 		c.Timeout = time.Second

@@ -54,6 +54,16 @@ func (c *Client) DeliverInfrastructureMetrics(entries []map[string]any) bool {
 	return c.post(c.configuration.InfrastructureMetricsURI(), map[string]any{"metrics": entries})
 }
 
+// DeliverChange posts one RecordChange payload to "/changes".
+func (c *Client) DeliverChange(change map[string]any) bool {
+	return c.post(c.configuration.ChangesURI(), change)
+}
+
+// DeliverChangeSnapshot posts the startup change snapshot to "/change_snapshots".
+func (c *Client) DeliverChangeSnapshot(snapshot map[string]any) bool {
+	return c.post(c.configuration.ChangeSnapshotsURI(), snapshot)
+}
+
 func (c *Client) post(uri string, payload map[string]any) bool {
 	if uri == "" {
 		return false

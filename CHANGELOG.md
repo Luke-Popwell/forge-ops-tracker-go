@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0 (2026-09-25)
+
+- New `forgeops.RecordChange(kind, title, options)` records a change that isn't a deploy (a feature flag, a config edit, a migration, a dependency or infrastructure change) so it shows up alongside errors and performance data. `kind` is one of the new `ChangeKind*` constants, anything else being sent as `other`; `ChangeOptions` carries the optional `Details`, `Environment` (defaulting to `Configuration.Environment`), `Service`, `Actor`, `URL`, `ID` (an idempotency key) and `OccurredAt` (defaulting to now). Delivered on the existing background delivery goroutine; never blocks, never panics, and is a no-op when the client isn't enabled.
+- The first `Init` that enables the client now sends one change snapshot per process, in the background: the Go version, plus every module version compiled into the binary (from `debug.ReadBuildInfo`). ForgeOps diffs it against the previous snapshot for the same environment to record what changed between deploys. New `Configuration.DetectChanges` (default true) turns it off.
+- New `Configuration.TrackEnvVarNames` (default false) adds the names, never the values, of the process's environment variables to that snapshot, leaving out host-specific names (`HOSTNAME`, `PATH`, `LC_*`, `KUBERNETES_*`, Kubernetes service variables and similar) and this client's own `FORGE_OPS_*` variables.
+- The Gin integration needs no update and still requires v0.5.0 of this module; it uses none of the above.
+
 ## 0.5.0
 
 - Distributed tracing across services, using the W3C Trace Context standard (`traceparent`). `nethttp.Middleware`, `nethttp.Timing`, `gin.Recovery` and `gin.Timing` now give every request a trace id on its context (new `forgeops.WithRequest(r)`, for any other router's middleware); one that arrives with a valid `traceparent` header continues that trace, and its root span points at the caller's span. A missing or malformed header starts a fresh trace. `forgeops.TraceID(ctx)` returns it.

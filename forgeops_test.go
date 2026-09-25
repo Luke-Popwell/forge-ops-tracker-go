@@ -30,6 +30,7 @@ func resetAndInit(t *testing.T) *int32 {
 	})
 
 	Init(func(c *Configuration) {
+		c.DetectChanges = false
 		c.DSN = "http://key@" + server.Listener.Addr().String() + "/events"
 		c.Environment = "production"
 		c.Timeout = time.Second
@@ -43,6 +44,7 @@ func TestInitAppliesConfiguration(t *testing.T) {
 	t.Cleanup(resetForTesting)
 
 	config := Init(func(c *Configuration) {
+		c.DetectChanges = false
 		c.DSN = "https://key@forgeops.example/events"
 		c.Release = "abc123"
 	})
@@ -112,6 +114,7 @@ func TestCaptureErrorIncludesTheGivenUserInTheDeliveredPayload(t *testing.T) {
 		resetForTesting()
 	})
 	Init(func(c *Configuration) {
+		c.DetectChanges = false
 		c.DSN = "http://key@" + server.Listener.Addr().String() + "/events"
 		c.Environment = "production"
 		c.Timeout = time.Second
