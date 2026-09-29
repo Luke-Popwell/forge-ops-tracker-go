@@ -105,7 +105,7 @@ func (b *EventBuilder) attachSQL(payload map[string]any, err error) {
 		return
 	}
 
-	masked := maskSQL(findSQL(err))
+	masked := maskSQL(findSQL(err), "")
 	if masked == "" {
 		return
 	}

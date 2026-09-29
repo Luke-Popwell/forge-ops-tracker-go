@@ -58,22 +58,60 @@ func TestMaskSQL(t *testing.T) {
 		{"SELECT a FROM sp_v2 WHERE b = 12abc", "SELECT a FROM sp_v2 WHERE b = 12abc"},
 	}
 	for _, c := range cases {
-		if got := maskSQL(c.in); got != c.want {
+		if got := maskSQL(c.in, ""); got != c.want {
 			t.Errorf("maskSQL(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }
 
 func TestMaskSQLIsIdempotentTruncatesAndReturnsEmptyForBlank(t *testing.T) {
-	once := maskSQL("SELECT * FROM t WHERE a = 'x' AND b = 9")
-	if maskSQL(once) != once {
-		t.Errorf("not idempotent: %q", maskSQL(once))
+	once := maskSQL("SELECT * FROM t WHERE a = 'x' AND b = 9", "")
+	if maskSQL(once, "") != once {
+		t.Errorf("not idempotent: %q", maskSQL(once, ""))
 	}
-	if got := len([]rune(maskSQL("SELECT " + strings.Repeat("a, ", 3000) + " b"))); got != maxSQLLength+3 {
+	if got := len([]rune(maskSQL("SELECT "+strings.Repeat("a, ", 3000)+" b", ""))); got != maxSQLLength+3 {
 		t.Errorf("truncated length = %d", got)
 	}
-	if maskSQL("  ") != "" {
+	if maskSQL("  ", "") != "" {
 		t.Error("blank should mask to empty")
+	}
+}
+
+// The corpus every SDK's masker is checked against, embedded since this module is published on its
+// own: {statement, db.system, what the server's SqlStatementMasker produces}.
+var sqlMaskCorpus = []struct{ input, system, expected string }{
+	{`SELECT * FROM orders WHERE email = 'a@b.co' AND id = 42 LIMIT 10`, "", `SELECT * FROM orders WHERE email = ? AND id = ? LIMIT ?`},
+	{`EXEC sp_note @text = 'it''s broken'`, "", `EXEC sp_note @text = ?`},
+	{`SELECT 1 WHERE name = 'unterminated`, "", `SELECT ? WHERE name = ?`},
+	{`DO $body$ BEGIN PERFORM 1; END $body$`, "", `DO ?`},
+	{`SELECT "user id" FROM orders2 WHERE id = $1 AND v = sp_v2(?)`, "", `SELECT "user id" FROM orders2 WHERE id = $1 AND v = sp_v2(?)`},
+	{`SELECT price * 1.5 FROM t`, "", `SELECT price * ? FROM t`},
+	{`SELECT * FROM users WHERE name = E'o\'brien' AND id = 1`, "", `SELECT * FROM users WHERE name = ? AND id = ?`},
+	{`SELECT * FROM users WHERE name = 'o\'brien' AND id = 1`, "", `SELECT * FROM users WHERE name = ? AND id = ?`},
+	{`SELECT * FROM t WHERE b = X'DEADBEEF' AND s = N'uni' AND u = U&'d\0061t' AND e = e'x'`, "", `SELECT * FROM t WHERE b = ? AND s = ? AND u = ? AND e = ?`},
+	{`SELECT * FROM t WHERE a LIKE'%secret%'`, "", `SELECT * FROM t WHERE a LIKE?`},
+	{`SELECT * FROM t WHERE f = 0x1F AND b = 0b101 AND n = 3e10 AND m = 1.5E-3 AND k = .5`, "", `SELECT * FROM t WHERE f = ? AND b = ? AND n = ? AND m = ? AND k = ?`},
+	{`SELECT e, t.col, 1e5e FROM t`, "", `SELECT e, t.col, 1e5e FROM t`},
+	{`SELECT "user id" FROM t WHERE token = "abc123secret"`, "mysql", `SELECT ? FROM t WHERE token = ?`},
+	{`SELECT "user id" FROM t WHERE token = "abc123secret"`, "MariaDB", `SELECT ? FROM t WHERE token = ?`},
+	{`SELECT "user id" FROM t WHERE token = "abc123secret"`, "postgresql", `SELECT "user id" FROM t WHERE token = "abc123secret"`},
+	{`SELECT "user id" FROM t WHERE token = "abc123secret"`, "", `SELECT "user id" FROM t WHERE token = "abc123secret"`},
+	{`SELECT * FROM t WHERE a = 'x' AND b = 9`, "", `SELECT * FROM t WHERE a = ? AND b = ?`},
+	{`SELECT * FROM t WHERE a = ? AND b = ?`, "", `SELECT * FROM t WHERE a = ? AND b = ?`},
+	{`SELECT * FROM t WHERE path = 'C:\\dir\\' AND n = 5`, "", `SELECT * FROM t WHERE path = ? AND n = ?`},
+	{`INSERT INTO t (a, b) VALUES (-5, +3.25e+2)`, "", `INSERT INTO t (a, b) VALUES (-?, +?)`},
+	{`SELECT * FROM t WHERE a = 'secret\`, "", `SELECT * FROM t WHERE a = ?`},
+	{`SELECT * FROM t WHERE a = "secret\`, "mysql", `SELECT * FROM t WHERE a = ?`},
+}
+
+func TestMaskSQLMatchesTheServerCorpus(t *testing.T) {
+	for _, c := range sqlMaskCorpus {
+		if got := maskSQL(c.input, c.system); got != c.expected {
+			t.Errorf("maskSQL(%q, %q) = %q, want %q", c.input, c.system, got, c.expected)
+		}
+		if got := maskSQL(c.expected, c.system); got != c.expected {
+			t.Errorf("not idempotent for %q (%q): %q", c.expected, c.system, got)
+		}
 	}
 }
 

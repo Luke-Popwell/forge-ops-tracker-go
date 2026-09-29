@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0 (2026-09-29)
+
+- SQL masking (a database span's `db.statement`, and the opt-in `sql_statement` on errors) now also catches strings with backslash-escaped quotes (`'o\'brien'`, `E'o\'brien'`), prefixed strings (`X'DEADBEEF'`, `N'...'`, `B'...'`, `U&'...'`, masked with their prefix), and hex, binary, exponent and leading-dot numbers (`0x1F`, `0b101`, `3e10`, `1.5E-3`, `.5`). On a database span whose `db.system` is `mysql` or `mariadb` (any case), `"double quoted"` strings are masked too; elsewhere they're identifiers and are left alone. This matches what ForgeOps itself masks on arrival.
+- A string cut off right after a backslash (`'secret\`, as a truncated statement can end) is now masked to the end like any other cut-off string, instead of being left as written.
+- The Gin integration needs no update and keeps requiring v0.7.0 of this module; it uses none of the above.
+
 ## 0.7.0 (2026-09-25)
 
 - A database span can now carry the SQL it ran. New `forgeops.StartDatabaseSpan(ctx, name, statement, dbSystem)` and `forgeops.RecordDatabaseSpan(ctx, name, statement, dbSystem, startedAt, duration)` record a `database` span whose data holds the statement as `db.statement` and the database name, lowercased, as `db.system` (`DatabaseSpanData(statement, dbSystem)` builds that map for `StartSpan`/`RecordSpan`). The statement is masked (every string and number becomes `?`) and cut to 4000 characters when the span is recorded, and a `db.statement` in any `database` span's data is masked the same way, so the SQL as written never leaves the process. Query arguments are never taken.

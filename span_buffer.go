@@ -223,7 +223,8 @@ func RecordDatabaseSpan(ctx context.Context, name, statement, dbSystem string, s
 
 // maskDatabaseSpanData returns a copy of a database span's data with "db.statement" masked, so the
 // SQL is masked however it got there (DatabaseSpanData, or a map built by hand). A statement that
-// isn't a string, or is blank, is dropped rather than sent. The caller's map is never modified.
+// isn't a string, or is blank, is dropped rather than sent. With a "db.system" of "mysql" or
+// "mariadb", "double quoted" text is masked too. The caller's map is never modified.
 func maskDatabaseSpanData(data map[string]any) map[string]any {
 	raw, present := data["db.statement"]
 	if !present {
@@ -235,7 +236,8 @@ func maskDatabaseSpanData(data map[string]any) map[string]any {
 	}
 	delete(out, "db.statement")
 	if statement, ok := raw.(string); ok {
-		if masked := maskSQL(statement); masked != "" {
+		system, _ := data["db.system"].(string)
+		if masked := maskSQL(statement, system); masked != "" {
 			out["db.statement"] = masked
 		}
 	}

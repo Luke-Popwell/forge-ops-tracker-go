@@ -15,8 +15,11 @@ import (
 //
 // Written as a hand-rolled scanner and tokenizer rather than regular expressions: Go's RE2 engine
 // deliberately has no lookbehind, lookahead or backreferences, which the shared pattern relies on
-// (a number is only a value when it isn't part of an identifier, and a dollar-quoted body ends at
-// the same tag that opened it). The rules are identical; only the mechanism differs.
+// (a number is only a value when it isn't part of an identifier, a string's E/X/N/B/U& prefix only
+// when it isn't the end of a word, and a dollar-quoted body ends at the same tag that opened it).
+// The rules are identical; only the mechanism differs. Strings allow '' and backslash escapes;
+// numbers include hex, binary, exponents and leading-dot decimals; "double quoted" text is a
+// string only for MySQL and MariaDB, and a name (left alone) everywhere else.
 //
 // Deliberately not a SQL parser.
 
@@ -101,76 +104,25 @@ func isSpaceByte(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'
 }
 
-// maskSQL replaces every string literal and number in statement with "?". Returns "" for a blank
-// statement.
-func maskSQL(statement string) string {
+// maskSQL replaces every string literal and number in statement with "?". system is the
+// statement's db.system when known ("" otherwise): for "mysql" or "mariadb", in any case, "double
+// quoted" text is a string there and is masked too. Returns "" for a blank statement.
+func maskSQL(statement, system string) string {
 	if strings.TrimSpace(statement) == "" {
 		return ""
 	}
+	doubleQuotes := strings.EqualFold(system, "mysql") || strings.EqualFold(system, "mariadb")
 
 	var out strings.Builder
 	s := statement
 	for i := 0; i < len(s); {
-		c := s[i]
-		switch {
-		case c == '\'':
-			// A string literal; '' is an escaped quote. One cut off by truncation (no closing
-			// quote) is masked to the end of the statement, never left half-visible.
-			j := i + 1
-			for j < len(s) {
-				if s[j] == '\'' {
-					if j+1 < len(s) && s[j+1] == '\'' {
-						j += 2
-						continue
-					}
-					j++
-					break
-				}
-				j++
-			}
-			out.WriteString(sqlMask)
-			i = j
-
-		case c == '$':
-			// A dollar-quoted body ($tag$ ... $tag$): PostgreSQL function bodies and DO blocks.
-			j := i + 1
-			for j < len(s) && (s[j] == '_' || (s[j] >= 'a' && s[j] <= 'z') || (s[j] >= 'A' && s[j] <= 'Z')) {
-				j++
-			}
-			if j < len(s) && s[j] == '$' {
-				tag := s[i : j+1]
-				end := len(s)
-				if idx := strings.Index(s[j+1:], tag); idx >= 0 {
-					end = j + 1 + idx + len(tag)
-				}
-				out.WriteString(sqlMask)
-				i = end
-			} else {
-				out.WriteByte(c)
-				i++
-			}
-
-		case isDigitByte(c):
-			// A number, unless it's part of an identifier (orders2, sp_v2), a $1 placeholder, or
-			// the fraction of another number; those digits are left alone.
-			if i > 0 && (isWordByte(s[i-1]) || s[i-1] == '$' || s[i-1] == '.') {
-				out.WriteByte(c)
-				i++
-				break
-			}
-			end := numberEnd(s, i)
-			if end < 0 {
-				out.WriteByte(c)
-				i++
-				break
-			}
+		if end := sqlLiteralEnd(s, i, doubleQuotes); end >= 0 {
 			out.WriteString(sqlMask)
 			i = end
-
-		default:
-			out.WriteByte(c)
-			i++
+			continue
 		}
+		out.WriteByte(s[i])
+		i++
 	}
 
 	masked := out.String()
@@ -180,29 +132,157 @@ func maskSQL(statement string) string {
 	return masked
 }
 
-// numberEnd returns where the number starting at i ends, or -1 when it isn't a standalone number
-// (digits immediately followed by a letter or underscore). A decimal that fails that check falls
-// back to just its integer part, the same way the shared pattern's backtracking does.
-func numberEnd(s string, i int) int {
-	k := i
-	for k < len(s) && isDigitByte(s[k]) {
-		k++
-	}
-	intEnd := k
-	if k+1 < len(s) && s[k] == '.' && isDigitByte(s[k+1]) {
-		m := k + 1
-		for m < len(s) && isDigitByte(s[m]) {
-			m++
+// sqlLiteralEnd returns where the literal starting at i ends, or -1 when none starts there. Where
+// the shared pattern would fail its lookbehind (a prefix or number that's part of a word), this
+// returns -1 and maskSQL simply moves on one byte, which is what the pattern does too.
+func sqlLiteralEnd(s string, i int, doubleQuotes bool) int {
+	c := s[i]
+	partOfWord := i > 0 && (isWordByte(s[i-1]) || s[i-1] == '$')
+	switch {
+	case c == '\'':
+		return quotedEnd(s, i, '\'')
+
+	case c == '"' && doubleQuotes:
+		return quotedEnd(s, i, '"')
+
+	case c == '$':
+		// A dollar-quoted body ($tag$ ... $tag$): PostgreSQL function bodies and DO blocks.
+		j := i + 1
+		for j < len(s) && (s[j] == '_' || (s[j] >= 'a' && s[j] <= 'z') || (s[j] >= 'A' && s[j] <= 'Z')) {
+			j++
 		}
-		if m >= len(s) || !isWordByte(s[m]) {
-			return m
+		if j < len(s) && s[j] == '$' {
+			tag := s[i : j+1]
+			if idx := strings.Index(s[j+1:], tag); idx >= 0 {
+				return j + 1 + idx + len(tag)
+			}
+			return len(s)
 		}
-	}
-	if intEnd >= len(s) || !isWordByte(s[intEnd]) {
-		return intEnd
+
+	case isDigitByte(c) || c == '.':
+		// A number, unless it's part of an identifier (orders2, sp_v2), a $1 placeholder, or the
+		// fraction of another number; those digits are left alone.
+		if partOfWord || (i > 0 && s[i-1] == '.') {
+			return -1
+		}
+		return numberEnd(s, i)
+
+	default:
+		// A string's type prefix (E'', X'', N'', B'', U&'') is masked along with it, unless the
+		// letter is really the end of a word: LIKE'%x%' keeps its E, and the quote still starts
+		// a string on the next byte.
+		prefix := 0
+		if strings.IndexByte("EeXxNnBb", c) >= 0 {
+			prefix = 1
+		} else if (c == 'U' || c == 'u') && i+1 < len(s) && s[i+1] == '&' {
+			prefix = 2
+		}
+		if prefix > 0 && !partOfWord && i+prefix < len(s) && s[i+prefix] == '\'' {
+			return quotedEnd(s, i+prefix, '\'')
+		}
 	}
 	return -1
 }
+
+// quotedEnd returns where the string opened by the quote q at i ends. A quote written twice, or a
+// backslash before any character ('o\'brien'), doesn't end it, and a string cut off by truncation
+// (no closing quote) is masked to the end of the statement, never left half-visible, including
+// one cut off right after a backslash.
+func quotedEnd(s string, i int, q byte) int {
+	for j := i + 1; j < len(s); {
+		switch s[j] {
+		case '\\':
+			j += 2
+			continue
+		case q:
+			if j+1 < len(s) && s[j+1] == q {
+				j += 2
+				continue
+			}
+			return j + 1
+		default:
+			j++
+		}
+	}
+	return len(s)
+}
+
+// numberEnd returns where the number starting at i ends, or -1 when it isn't a standalone number
+// (immediately followed by a letter, digit or underscore). Hex (0x1F) and binary (0b101) come
+// first; otherwise an integer or decimal (or a leading-dot .5), with an optional exponent (3e10,
+// 1.5E-3). A form that fails the standalone check falls back to a shorter one (1.5e3x to 1.5, then
+// to 1) the same way the shared pattern's backtracking does.
+func numberEnd(s string, i int) int {
+	standalone := func(end int) bool { return end >= len(s) || !isWordByte(s[end]) }
+
+	if end := radixNumberEnd(s, i, 'x', isHexByte); end >= 0 && standalone(end) {
+		return end
+	}
+	if end := radixNumberEnd(s, i, 'b', isBinaryByte); end >= 0 && standalone(end) {
+		return end
+	}
+
+	var bases []int
+	if isDigitByte(s[i]) {
+		k := digitsEnd(s, i)
+		if k+1 < len(s) && s[k] == '.' && isDigitByte(s[k+1]) {
+			bases = append(bases, digitsEnd(s, k+1))
+		}
+		bases = append(bases, k)
+	} else if i+1 < len(s) && isDigitByte(s[i+1]) {
+		bases = append(bases, digitsEnd(s, i+1))
+	}
+	for _, base := range bases {
+		if end := exponentEnd(s, base); end >= 0 && standalone(end) {
+			return end
+		}
+		if standalone(base) {
+			return base
+		}
+	}
+	return -1
+}
+
+// radixNumberEnd returns where a 0x (or 0b) number starting at i ends, or -1 if none starts there;
+// letter is the lowercase marker, and either case matches.
+func radixNumberEnd(s string, i int, letter byte, digit func(byte) bool) int {
+	if s[i] != '0' || i+2 >= len(s) || (s[i+1]|0x20) != letter || !digit(s[i+2]) {
+		return -1
+	}
+	k := i + 2
+	for k < len(s) && digit(s[k]) {
+		k++
+	}
+	return k
+}
+
+// exponentEnd returns where an exponent (e10, E-3, e+2) starting at k ends, or -1 if none does.
+func exponentEnd(s string, k int) int {
+	if k >= len(s) || (s[k] != 'e' && s[k] != 'E') {
+		return -1
+	}
+	m := k + 1
+	if m < len(s) && (s[m] == '+' || s[m] == '-') {
+		m++
+	}
+	if m >= len(s) || !isDigitByte(s[m]) {
+		return -1
+	}
+	return digitsEnd(s, m)
+}
+
+func digitsEnd(s string, k int) int {
+	for k < len(s) && isDigitByte(s[k]) {
+		k++
+	}
+	return k
+}
+
+func isHexByte(c byte) bool {
+	return isDigitByte(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+func isBinaryByte(c byte) bool { return c == '0' || c == '1' }
 
 type sqlToken struct {
 	text   string

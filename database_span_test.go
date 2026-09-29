@@ -79,6 +79,30 @@ func TestAStatementPutInDataByHandIsMaskedOnADatabaseSpanOnly(t *testing.T) {
 	}
 }
 
+func TestDoubleQuotedValuesAreMaskedOnMySQLAndMariaDBSpansOnly(t *testing.T) {
+	server := newSpansServer(t)
+	initTracing(t, server, nil)
+
+	start := time.Now()
+	ctx := WithTrace(context.Background())
+	RecordDatabaseSpan(ctx, "mysql", `SELECT id FROM t WHERE token = "abc123secret"`, "MySQL", time.Now(), time.Millisecond)
+	RecordSpan(ctx, "mariadb", "database", time.Now(), time.Millisecond,
+		map[string]any{"db.statement": `SELECT id FROM t WHERE name = "jane"`, "db.system": "MariaDB"})
+	RecordDatabaseSpan(ctx, "postgres", `SELECT "user id" FROM t`, "postgresql", time.Now(), time.Millisecond)
+	FinishTrace(ctx, "GET /t", start, 1500*time.Millisecond)
+
+	trace := server.waitForTraces(t, 1)[0]
+	for name, want := range map[string]string{
+		"mysql":    "SELECT id FROM t WHERE token = ?",
+		"mariadb":  "SELECT id FROM t WHERE name = ?",
+		"postgres": `SELECT "user id" FROM t`,
+	} {
+		if got := spanNamed(t, trace, name)["data"].(map[string]any)["db.statement"]; got != want {
+			t.Errorf("%s: db.statement = %v, want %q", name, got, want)
+		}
+	}
+}
+
 func TestALongStatementIsTruncated(t *testing.T) {
 	server := newSpansServer(t)
 	initTracing(t, server, nil)

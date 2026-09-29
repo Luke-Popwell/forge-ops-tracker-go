@@ -252,6 +252,13 @@ duration)` does the same as `RecordSpan`, and `forgeops.DatabaseSpanData(stateme
 the data map if you'd rather call `StartSpan` directly. A `db.statement` in any `database` span's
 data is masked the same way, however the map was built.
 
+Masking covers strings with `''` or backslash-escaped quotes (`'o\'brien'`), prefixed strings
+(`E'...'`, `X'DEADBEEF'`, `N'...'`, `B'...'`, `U&'...'`), `$tag$` dollar-quoted bodies, and hex,
+binary, exponent and leading-dot numbers (`0x1F`, `0b101`, `1.5E-3`, `.5`), but never the digits in
+a name like `orders2` or a `$1` placeholder. With a `db.system` of `"mysql"` or `"mariadb"`,
+`"double quoted"` values are masked too; for any other database they're names, and are left as
+written.
+
 Delivery is on its own small goroutine and bounded queue (one trace per POST to `/spans`), so
 reporting a slow request never makes it slower; a full queue drops the trace rather than blocking.
 
