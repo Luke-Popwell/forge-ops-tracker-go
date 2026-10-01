@@ -93,8 +93,8 @@ func metricState() (*Configuration, *MetricBuffer, *MetricBuffer) {
 // be negative (a refund). A no-op when the client isn't enabled (no DSN, or this environment isn't in
 // EnabledEnvironments), and a NaN or infinite value is dropped.
 //
-// Go has no exit hook to flush from, so a short-lived program should call FlushMetrics before it
-// returns from main (typically deferred right after Init).
+// Go has no exit hook to flush from, so a short-lived program should call Flush (or FlushMetrics)
+// before it returns from main (typically deferred right after Init).
 func CaptureMetric(name string, value float64) {
 	config, metrics, _ := metricState()
 	if !config.IsEnabled() {
@@ -124,6 +124,85 @@ func FlushMetrics() {
 	_, metrics, infrastructure := metricState()
 	metrics.Flush()
 	infrastructure.Flush()
+}
+
+// Flush sends everything this client is still holding: queued errors, changes and the startup
+// change snapshot, captured traces, buffered metrics and infrastructure readings, and the current
+// performance window. It waits at most timeout in total and reports whether it all finished in time
+// (a delivery the server rejected still counts as finished: Flush is about not leaving anything
+// behind, not about whether ForgeOps accepted it). FlushMetrics and the periodic flushes keep
+// working as before; this is the one call that covers all of them.
+//
+// Delivery happens on background goroutines and Go has no exit hook, so a program that returns
+// from main (or calls os.Exit) right after reporting something loses it unless it calls this
+// first. Defer it right after Init in a script, CLI or cron job:
+//
+//	forgeops.Init(func(c *forgeops.Configuration) { ... })
+//	defer forgeops.Flush(2 * time.Second)
+//
+// Deferred functions also run while a panic unwinds, so this covers a panic that Recover reported
+// too. A long-running server doesn't need it, other than on a graceful shutdown.
+func Flush(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+
+	mu.Lock()
+	r, spans, perf, metrics, infrastructure := reporter, spanQueue, performanceFlusher, metricBuffer, infraBuffer
+	mu.Unlock()
+
+	if !waitUntil(deadline, changeSnapshotPending.Wait) {
+		return false
+	}
+	if r != nil && !r.deliveryQueue.Flush(time.Until(deadline)) {
+		return false
+	}
+	if spans != nil && !spans.Flush(time.Until(deadline)) {
+		return false
+	}
+	return waitUntil(deadline, func() {
+		if perf != nil {
+			perf.Flush()
+		}
+		if metrics != nil {
+			metrics.Flush()
+			infrastructure.Flush()
+		}
+	})
+}
+
+// recoverFlushTimeout bounds how long Recover/RecoverCtx wait for the panic they just reported to
+// go out before re-panicking: long enough for one delivery at the default Configuration.Timeout,
+// short enough that an unreachable ForgeOps barely delays the crash.
+const recoverFlushTimeout = 2 * time.Second
+
+// flushReported waits for the error queue (only: not traces or metrics, so a panicking request
+// in a server isn't held up by an unrelated metrics flush) to deliver what was queued so far.
+func flushReported(r *Reporter) {
+	r.deliveryQueue.Flush(recoverFlushTimeout)
+}
+
+// waitUntil runs work on its own goroutine and waits for it until deadline, reporting whether it
+// finished. Work that overruns keeps going in the background; it just isn't waited for.
+func waitUntil(deadline time.Time, work func()) bool {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() { _ = recover() }()
+		work()
+	}()
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		// Both may be ready at once; finishing exactly at the deadline still counts.
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}
 }
 
 func nilIfEmpty(s string) any {
@@ -205,6 +284,9 @@ func CaptureErrorCtx(ctx stdcontext.Context, err error, context map[string]any, 
 //
 //	defer forgeops.Recover(nil, nil)
 //
+// It waits (up to 2 seconds) for the report to be delivered before re-panicking, so a panic that
+// crashes the process still reaches ForgeOps rather than dying with the delivery goroutine.
+//
 // It never swallows the panic: after reporting, it re-panics with the original value, so whatever
 // would have happened without this client: crash the process, a log line from a supervisor, a
 // failed test: still happens exactly the same way. The same "report, then don't change program
@@ -220,11 +302,13 @@ func Recover(context map[string]any, user map[string]any) {
 	pcs := captureStack()
 	_, r := state()
 	r.Report(panicError(v), context, user, pcs, nil)
+	flushReported(r)
 	panic(v)
 }
 
 // RecoverCtx is Recover, plus whatever breadcrumb trail WithBreadcrumbs already attached to ctx:
-// same relationship CaptureErrorCtx has to CaptureError above. Deferred exactly the same way:
+// same relationship CaptureErrorCtx has to CaptureError above, including the bounded wait for the
+// report to go out before re-panicking. Deferred exactly the same way:
 //
 //	defer forgeops.RecoverCtx(ctx, nil, nil)
 //
@@ -239,6 +323,7 @@ func RecoverCtx(ctx stdcontext.Context, context map[string]any, user map[string]
 	pcs := captureStack()
 	_, r := state()
 	r.report(panicError(v), context, user, pcs, breadcrumbsFromContext(ctx), traceFieldsForError(ctx))
+	flushReported(r)
 	panic(v)
 }
 

@@ -160,6 +160,109 @@ func TestRecoverReportsThenRepanics(t *testing.T) {
 	}
 }
 
+// initAgainst resets package-level state and points Init at server, the setup resetAndInit does
+// for its own server.
+func initAgainst(t *testing.T, server *httptest.Server, path string, timeout time.Duration) {
+	t.Helper()
+	resetForTesting()
+	t.Cleanup(func() {
+		server.Close()
+		resetForTesting()
+	})
+	Init(func(c *Configuration) {
+		c.DetectChanges = false
+		c.DSN = "http://key@" + server.Listener.Addr().String() + path
+		c.Environment = "production"
+		c.Timeout = timeout
+		c.Logger = noopLogger{}
+	})
+}
+
+// A server slow enough that, without Recover's own flush, the panic would be caught below well
+// before its report arrived.
+func TestRecoverWaitsForDeliveryBeforeRepanicking(t *testing.T) {
+	var received int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		atomic.AddInt32(&received, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	initAgainst(t, server, "/events", time.Second)
+
+	deliveredWhenRepanicked := int32(-1)
+	func() {
+		defer func() {
+			if recover() != nil {
+				deliveredWhenRepanicked = atomic.LoadInt32(&received)
+			}
+		}()
+		defer Recover(nil, nil)
+		panic("boom")
+	}()
+
+	if deliveredWhenRepanicked != 1 {
+		t.Fatalf("server had received %d requests when the panic resumed, want 1", deliveredWhenRepanicked)
+	}
+}
+
+func TestFlushDeliversQueuedErrorsAndBufferedMetrics(t *testing.T) {
+	var events, metrics int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(30 * time.Millisecond)
+		if strings.HasSuffix(r.URL.Path, "/events") {
+			atomic.AddInt32(&events, 1)
+		} else {
+			atomic.AddInt32(&metrics, 1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	initAgainst(t, server, "/api/v1/events", time.Second)
+
+	CaptureError(errors.New("first"), nil, nil)
+	CaptureError(errors.New("second"), nil, nil)
+	CaptureMetric("signup", 1)
+
+	if !Flush(2 * time.Second) {
+		t.Fatal("Flush() = false, want true")
+	}
+	if got := atomic.LoadInt32(&events); got != 2 {
+		t.Errorf("server had received %d events when Flush returned, want 2", got)
+	}
+	if got := atomic.LoadInt32(&metrics); got != 1 {
+		t.Errorf("server had received %d metric batches when Flush returned, want 1", got)
+	}
+}
+
+func TestFlushReturnsFalseWhenDeliveryOutlastsTheTimeout(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}))
+	initAgainst(t, server, "/events", 5*time.Second)
+	// Registered after initAgainst so it runs first: server.Close waits for the blocked handler.
+	t.Cleanup(func() { close(release) })
+
+	CaptureError(errors.New("boom"), nil, nil)
+
+	started := time.Now()
+	if Flush(100 * time.Millisecond) {
+		t.Fatal("Flush() = true, want false: the delivery was still blocked on the server")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Errorf("Flush(100ms) returned after %v", elapsed)
+	}
+}
+
+func TestFlushBeforeAnythingWasReportedReturnsTrue(t *testing.T) {
+	resetForTesting()
+	t.Cleanup(resetForTesting)
+
+	if !Flush(time.Second) {
+		t.Error("Flush() with nothing reported = false, want true")
+	}
+}
+
 func TestRecoverDoesNothingWithoutAPanic(t *testing.T) {
 	received := resetAndInit(t)
 

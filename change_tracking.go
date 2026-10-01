@@ -136,6 +136,9 @@ func buildChangePayload(config *Configuration, kind, title string, options *Chan
 var (
 	changeSnapshotMu   sync.Mutex
 	changeSnapshotSent bool
+	// changeSnapshotPending covers the goroutine below until it has queued the snapshot, so Flush
+	// right after Init still sends it.
+	changeSnapshotPending sync.WaitGroup
 )
 
 // sendChangeSnapshotOnce queues the startup change snapshot the first time Init leaves the client
@@ -153,7 +156,9 @@ func sendChangeSnapshotOnce(config *Configuration, r *Reporter) {
 	}
 	changeSnapshotSent = true
 
+	changeSnapshotPending.Add(1)
 	go func() {
+		defer changeSnapshotPending.Done()
 		defer func() {
 			if p := recover(); p != nil {
 				config.Logger.Debugf("change snapshot failed: %v", p)

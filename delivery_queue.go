@@ -1,6 +1,9 @@
 package forgeops
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // DeliveryQueue is a small in-process worker goroutine + buffered channel, so delivery never
 // blocks the caller that reported the error and never depends on the host app having any
@@ -61,6 +64,39 @@ func (q *DeliveryQueue) push(item queuedDelivery) bool {
 		return true
 	default:
 		q.configuration.Logger.Debugf("delivery queue full, dropping event")
+		return false
+	}
+}
+
+// Flush waits until everything queued before this call has been delivered (or given up on: a
+// failed delivery counts as done, the same as on the worker itself), at most timeout, and reports
+// whether it got there in time. It queues a marker behind those payloads and waits for the worker
+// to reach it, so the channel's own ordering is what guarantees they all went first, and payloads
+// queued after this call never keep it waiting.
+func (q *DeliveryQueue) Flush(timeout time.Duration) bool {
+	done := make(chan struct{})
+	marker := queuedDelivery{deliver: func(map[string]any) bool {
+		close(done)
+		return true
+	}}
+	q.once.Do(func() { go q.run() })
+	return sendAndWait(q.queue, marker, done, timeout)
+}
+
+// sendAndWait queues marker on queue (waiting for room if it's full) and then waits for done to
+// close, all within timeout. Shared by DeliveryQueue.Flush and SpanQueue.Flush.
+func sendAndWait[T any](queue chan T, marker T, done chan struct{}, timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case queue <- marker:
+	case <-timer.C:
+		return false
+	}
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
 		return false
 	}
 }

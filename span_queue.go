@@ -1,6 +1,9 @@
 package forgeops
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // SpanQueue is the same shape and reasoning as DeliveryQueue: a small in-process worker goroutine
 // plus a bounded channel, so delivering a captured trace never adds latency to the very request it
@@ -12,8 +15,14 @@ import "sync"
 type SpanQueue struct {
 	configuration *Configuration
 	client        *Client
-	queue         chan map[string]any
+	queue         chan queuedTrace
 	once          sync.Once
+}
+
+// queuedTrace is one whole trace, or (with done set) the marker Flush waits on.
+type queuedTrace struct {
+	trace map[string]any
+	done  chan struct{}
 }
 
 func NewSpanQueue(configuration *Configuration, client *Client) *SpanQueue {
@@ -21,7 +30,7 @@ func NewSpanQueue(configuration *Configuration, client *Client) *SpanQueue {
 	if size < 1 {
 		size = 1
 	}
-	return &SpanQueue{configuration: configuration, client: client, queue: make(chan map[string]any, size)}
+	return &SpanQueue{configuration: configuration, client: client, queue: make(chan queuedTrace, size)}
 }
 
 // Push enqueues one whole trace, returning false (and dropping it) if the queue is full rather
@@ -31,7 +40,7 @@ func (q *SpanQueue) Push(trace map[string]any) bool {
 	q.once.Do(func() { go q.run() })
 
 	select {
-	case q.queue <- trace:
+	case q.queue <- queuedTrace{trace: trace}:
 		return true
 	default:
 		q.configuration.Logger.Debugf("span delivery queue full, dropping trace")
@@ -39,9 +48,21 @@ func (q *SpanQueue) Push(trace map[string]any) bool {
 	}
 }
 
+// Flush waits until every trace queued before this call has been delivered, at most timeout: the
+// same marker approach as DeliveryQueue.Flush.
+func (q *SpanQueue) Flush(timeout time.Duration) bool {
+	done := make(chan struct{})
+	q.once.Do(func() { go q.run() })
+	return sendAndWait(q.queue, queuedTrace{done: done}, done, timeout)
+}
+
 func (q *SpanQueue) run() {
-	for trace := range q.queue {
-		q.deliverSafely(trace)
+	for item := range q.queue {
+		if item.done != nil {
+			close(item.done)
+			continue
+		}
+		q.deliverSafely(item.trace)
 	}
 }
 

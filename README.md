@@ -97,7 +97,33 @@ func worker() {
 `Recover` never swallows the panic: after reporting, it re-panics with the original value, so
 whatever would have happened without this client: crash the process, a log line from a
 supervisor, a failed test: still happens exactly the same way. Reporting an error should never
-change what your program actually does.
+change what your program actually does. Before re-panicking it waits (up to 2 seconds) for the
+report to be delivered, so a panic that crashes the process still reaches ForgeOps.
+
+### Scripts, CLIs and cron jobs: flush before `main` returns
+
+Delivery happens on a background goroutine, and Go has no exit hook, so anything still queued when
+`main` returns (or `os.Exit` is called) is lost with it. A short-lived program should defer
+`forgeops.Flush` right after `Init`:
+
+```go
+func main() {
+    forgeops.Init(func(c *forgeops.Configuration) { /* ... */ })
+    defer forgeops.Flush(2 * time.Second)
+    defer forgeops.Recover(nil, nil)
+
+    if err := run(); err != nil {
+        forgeops.CaptureError(err, nil, nil)
+    }
+}
+```
+
+`Flush(timeout)` sends everything the client is still holding (queued errors and changes,
+captured traces, buffered metrics and the current performance window), waits at most `timeout`,
+and returns whether it all finished in time. Deferred calls run while a panic unwinds too, so this
+also covers a panic `Recover` reported. Note that `os.Exit` skips deferred calls: call
+`forgeops.Flush` yourself before an `os.Exit` or `log.Fatal`. A long-running server doesn't need
+it, other than on a graceful shutdown.
 
 A plain Go `error` carries no stack trace of its own, so `CaptureError`/`Recover` capture the
 backtrace at their own call site via `runtime.Callers`, not from the error value. Call
@@ -387,13 +413,16 @@ forgeops.CaptureMetric("payment", 49)  // a real magnitude; it may be negative (
 
 forgeops.CaptureInfrastructureMetric("cpu", 0.42, "")      // "" defaults to Configuration.ServerName
 forgeops.CaptureInfrastructureMetric("disk", 0.81, "db-1")
-forgeops.FlushMetrics()                                    // send right now
+forgeops.FlushMetrics()                                    // send the metrics right now
 ```
 
 Each capture is buffered and flushed as one batch every `MetricFlushInterval` /
 `InfrastructureMetricFlushInterval` (60 seconds by default) on a goroutine started on the first
-capture. **Go has no exit hook to flush from**, so a short-lived program (a cron job) must call
-`forgeops.FlushMetrics()` before it returns from `main`, typically `defer`red right after `Init`.
+capture. **Go has no exit hook to flush from**, so a short-lived program (a cron job) must flush
+before it returns from `main`: `defer forgeops.Flush(2 * time.Second)` right after `Init` covers
+metrics along with errors and everything else (see
+[Scripts, CLIs and cron jobs](#scripts-clis-and-cron-jobs-flush-before-main-returns)).
+`forgeops.FlushMetrics()` still sends just the metrics, with no timeout of its own.
 Every entry is stored as it was captured (a signup is a row, not a running total), so a count or sum
 you compute later is exact. Both are a no-op when the client isn't enabled for the environment.
 

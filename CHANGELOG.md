@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.0 (2026-10-01)
+
+- An error reported just before a program exits is no longer lost. Delivery happens on a background goroutine and Go has no exit hook, so returning from `main` (or calling `os.Exit`) right after `CaptureError` used to drop the event. New `forgeops.Flush(timeout time.Duration) bool` sends everything the client is still holding (queued errors and changes, the startup change snapshot, captured traces, buffered metrics and infrastructure readings, and the current performance window), waits at most `timeout`, and returns whether it all finished in time. Scripts, CLIs and cron jobs should `defer forgeops.Flush(2 * time.Second)` right after `Init`. `FlushMetrics` is unchanged.
+- `Recover` and `RecoverCtx` now wait (up to 2 seconds) for the panic they report to be delivered before re-panicking, so a panic in `main` that crashes the process still reaches ForgeOps. A panic that escapes a request handler through `nethttp.Middleware` waits the same way before the server closes the connection.
+- The Gin integration needs no update and keeps requiring v0.8.0 of this module; its `Recovery` doesn't re-panic, so it doesn't need to flush.
+
 ## 0.8.0 (2026-09-29)
 
 - SQL masking (a database span's `db.statement`, and the opt-in `sql_statement` on errors) now also catches strings with backslash-escaped quotes (`'o\'brien'`, `E'o\'brien'`), prefixed strings (`X'DEADBEEF'`, `N'...'`, `B'...'`, `U&'...'`, masked with their prefix), and hex, binary, exponent and leading-dot numbers (`0x1F`, `0b101`, `3e10`, `1.5E-3`, `.5`). On a database span whose `db.system` is `mysql` or `mariadb` (any case), `"double quoted"` strings are masked too; elsewhere they're identifiers and are left alone. This matches what ForgeOps itself masks on arrival.
