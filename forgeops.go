@@ -18,8 +18,11 @@ import (
 	// context.Context/context.Background unreachable exactly where they're needed.
 	stdcontext "context"
 	"fmt"
+	"io"
+	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -230,8 +233,28 @@ func Init(configure func(*Configuration)) *Configuration {
 	if configure != nil {
 		configure(config)
 	}
+	warnIfNotSending(config, &notSendingWarned, os.Stderr)
 	sendChangeSnapshotOnce(config, r)
 	return config
+}
+
+// notSendingWarned is set once the "not sending from this environment" warning has printed, so it
+// prints once per process however many times Init runs.
+var notSendingWarned atomic.Bool
+
+// warnIfNotSending prints Configuration.NotSendingWarning at most once (tracked by warned): through
+// the configured Logger when one is set, otherwise to stderr, since a DSN that quietly sends nothing
+// is the one setup mistake a new install can't otherwise see. Silent without a DSN.
+func warnIfNotSending(config *Configuration, warned *atomic.Bool, stderr io.Writer) {
+	warning := config.NotSendingWarning()
+	if warning == "" || !warned.CompareAndSwap(false, true) {
+		return
+	}
+	if _, isNoop := config.Logger.(noopLogger); config.Logger != nil && !isNoop {
+		config.Logger.Debugf("%s", warning)
+		return
+	}
+	fmt.Fprintln(stderr, "[ForgeOps] "+warning)
 }
 
 // CaptureError reports an error you've already handled. Call it right at the point you'd

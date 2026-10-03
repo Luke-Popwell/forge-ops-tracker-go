@@ -37,6 +37,19 @@ Call `Init` once at startup, before `http.ListenAndServe` or right after buildin
 a closure to set any `Configuration` field, so every option is available through the one call
 without a long list of positional arguments or a separate setter for each field.
 
+### Environments
+
+The environment comes from `c.Environment`, or the `FORGE_OPS_ENVIRONMENT` environment variable,
+and is `"production"` when neither is set, so a DSN alone is enough to start sending. Errors are
+only sent from the enabled environments (`c.EnabledEnvironments`, default `production` and
+`staging`). On a machine that shouldn't send, such as a laptop, set
+`FORGE_OPS_ENVIRONMENT=development`. When a DSN is configured but the environment isn't enabled,
+`Init` says so once, through `c.Logger` if you set one and on stderr otherwise:
+
+```
+[ForgeOps] Not sending: this environment is "development", and only production, staging are enabled. Set FORGE_OPS_ENVIRONMENT=production (or add "development" to the enabled environments) to send from here.
+```
+
 ### Plain net/http (and anything with the same middleware signature: chi, gorilla/mux, most
 ### lightweight routers)
 
@@ -80,6 +93,8 @@ replacement for `gin.Recovery()`, not an addition alongside it.
 wasn't handled." Two entry points cover the two shapes Go errors actually come in:
 
 ```go
+import forgeops "github.com/Luke-Popwell/forge-ops-tracker-go"
+
 // An error you already have: report it right where you'd otherwise just log it:
 if err != nil {
     forgeops.CaptureError(err, map[string]any{"order_id": order.ID}, nil)
@@ -107,6 +122,12 @@ Delivery happens on a background goroutine, and Go has no exit hook, so anything
 `forgeops.Flush` right after `Init`:
 
 ```go
+import (
+    "time"
+
+    forgeops "github.com/Luke-Popwell/forge-ops-tracker-go"
+)
+
 func main() {
     forgeops.Init(func(c *forgeops.Configuration) { /* ... */ })
     defer forgeops.Flush(2 * time.Second)
@@ -399,8 +420,7 @@ forgeops.Init(func(c *forgeops.Configuration) {
 ```
 
 Requires a ForgeOps plan that includes performance monitoring; on a plan that doesn't, the
-periodic flushes are simply rejected server-side and dropped, exactly like any other delivery
-failure.
+periodic flushes are accepted but not recorded, and the response says why.
 
 ## Custom metrics and infrastructure monitoring
 
@@ -552,7 +572,7 @@ environment variables, so one added or removed between deploys shows up too. Nam
 host to host (`HOSTNAME`, `PATH`, `HOME`, `LC_*`, `KUBERNETES_*`, Kubernetes' `*_SERVICE_HOST`
 style service variables and similar) and this client's own `FORGE_OPS_*` variables are left out,
 so a fleet of identical hosts doesn't look like it's changing. Both need a ForgeOps plan that
-includes change tracking; on one that doesn't, they are rejected server-side and dropped silently.
+includes change tracking; on one that doesn't, they are accepted but not recorded, and the response says why.
 
 ## Running the tests
 

@@ -1,9 +1,11 @@
 package forgeops
 
 import (
+	"fmt"
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -125,12 +127,13 @@ type Configuration struct {
 
 // NewConfiguration returns a Configuration seeded from FORGE_OPS_DSN/FORGE_OPS_ENVIRONMENT/
 // FORGE_OPS_RELEASE and sensible defaults for everything else: the same env vars and defaults
-// every other client in this repo reads.
+// every other client in this repo reads. Environment is "production" unless FORGE_OPS_ENVIRONMENT
+// says otherwise (see resolveEnvironment).
 func NewConfiguration() *Configuration {
 	cwd, _ := os.Getwd()
 	return &Configuration{
 		DSN:                               os.Getenv("FORGE_OPS_DSN"),
-		Environment:                       envOrDefault("FORGE_OPS_ENVIRONMENT", "development"),
+		Environment:                       resolveEnvironment(os.Getenv),
 		Release:                           os.Getenv("FORGE_OPS_RELEASE"),
 		ServerName:                        safeHostname(),
 		AppRoot:                           cwd,
@@ -181,11 +184,37 @@ func (c *Configuration) ShouldPropagateTrace(host string) bool {
 	return false
 }
 
-func envOrDefault(key, fallback string) string {
-	if v, ok := os.LookupEnv(key); ok {
+// resolveEnvironment is the environment a new Configuration starts with, read through getenv:
+// FORGE_OPS_ENVIRONMENT when set and not blank, otherwise "production", so a process given a DSN
+// and nothing else sends. Go has no standard runtime variable naming the environment, so none is
+// consulted. Set FORGE_OPS_ENVIRONMENT=development where nothing should be sent.
+func resolveEnvironment(getenv func(string) string) string {
+	if v := getenv("FORGE_OPS_ENVIRONMENT"); strings.TrimSpace(v) != "" {
 		return v
 	}
-	return fallback
+	return "production"
+}
+
+// NotSendingWarning explains why nothing will be sent when this configuration has a DSN but its
+// Environment isn't one of EnabledEnvironments. Empty when there's nothing to warn about (no DSN,
+// or the environment is enabled). Init prints it once per process.
+func (c *Configuration) NotSendingWarning() string {
+	if c.DSN == "" || c.APIKey() == "" || c.EnabledEnvironments[c.Environment] {
+		return ""
+	}
+	var enabled []string
+	for name, on := range c.EnabledEnvironments {
+		if on {
+			enabled = append(enabled, name)
+		}
+	}
+	sort.Strings(enabled)
+	list := "no environments are enabled"
+	if len(enabled) > 0 {
+		list = "only " + strings.Join(enabled, ", ") + " are enabled"
+	}
+	return fmt.Sprintf("Not sending: this environment is %q, and %s. Set FORGE_OPS_ENVIRONMENT=production "+
+		"(or add %q to the enabled environments) to send from here.", c.Environment, list, c.Environment)
 }
 
 func safeHostname() string {

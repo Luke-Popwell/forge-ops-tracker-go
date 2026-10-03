@@ -1,10 +1,115 @@
 package forgeops
 
 import (
+	"bytes"
+	"fmt"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+const developmentWarning = `Not sending: this environment is "development", and only production, staging are enabled. ` +
+	`Set FORGE_OPS_ENVIRONMENT=production (or add "development" to the enabled environments) to send from here.`
+
+func TestResolveEnvironment(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"nothing set", map[string]string{}, "production"},
+		{"blank", map[string]string{"FORGE_OPS_ENVIRONMENT": "  "}, "production"},
+		{"FORGE_OPS_ENVIRONMENT", map[string]string{"FORGE_OPS_ENVIRONMENT": "development"}, "development"},
+		{"GO_ENV is not consulted", map[string]string{"GO_ENV": "development"}, "production"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveEnvironment(func(key string) string { return tc.env[key] })
+			if got != tc.want {
+				t.Errorf("resolveEnvironment = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func developmentConfiguration() *Configuration {
+	return &Configuration{
+		DSN:                 "https://abc123@example.com/api/v1/events",
+		Environment:         "development",
+		EnabledEnvironments: map[string]bool{"staging": true, "production": true},
+		Logger:              noopLogger{},
+	}
+}
+
+func TestNotSendingWarningExplainsADisabledEnvironment(t *testing.T) {
+	if got := developmentConfiguration().NotSendingWarning(); got != developmentWarning {
+		t.Errorf("NotSendingWarning() = %q, want %q", got, developmentWarning)
+	}
+}
+
+func TestNoNotSendingWarningWhenEnabledOrUnconfigured(t *testing.T) {
+	enabled := developmentConfiguration()
+	enabled.Environment = "staging"
+	noDSN := developmentConfiguration()
+	noDSN.DSN = ""
+	added := developmentConfiguration()
+	added.EnabledEnvironments["development"] = true
+
+	for name, c := range map[string]*Configuration{"enabled": enabled, "no DSN": noDSN, "added": added} {
+		if got := c.NotSendingWarning(); got != "" {
+			t.Errorf("%s: NotSendingWarning() = %q, want empty", name, got)
+		}
+	}
+}
+
+func TestWarnIfNotSendingPrintsToStderrOnce(t *testing.T) {
+	var stderr bytes.Buffer
+	var warned atomic.Bool
+
+	warnIfNotSending(developmentConfiguration(), &warned, &stderr)
+	warnIfNotSending(developmentConfiguration(), &warned, &stderr)
+
+	if want := "[ForgeOps] " + developmentWarning + "\n"; stderr.String() != want {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+type recordingLogger struct{ lines []string }
+
+func (l *recordingLogger) Debugf(format string, args ...any) {
+	l.lines = append(l.lines, fmt.Sprintf(format, args...))
+}
+
+func TestWarnIfNotSendingUsesTheConfiguredLogger(t *testing.T) {
+	var stderr bytes.Buffer
+	var warned atomic.Bool
+	logger := &recordingLogger{}
+	c := developmentConfiguration()
+	c.Logger = logger
+
+	warnIfNotSending(c, &warned, &stderr)
+
+	if len(logger.lines) != 1 || logger.lines[0] != developmentWarning {
+		t.Errorf("logged %q, want just the warning", logger.lines)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestWarnIfNotSendingIsSilentWithoutADSN(t *testing.T) {
+	var stderr bytes.Buffer
+	var warned atomic.Bool
+	c := developmentConfiguration()
+	c.DSN = ""
+
+	warnIfNotSending(c, &warned, &stderr)
+
+	if stderr.Len() != 0 || warned.Load() {
+		t.Errorf("stderr = %q, warned = %v; want silence", stderr.String(), warned.Load())
+	}
+}
 
 func TestNewConfigurationDefaults(t *testing.T) {
 	t.Setenv("FORGE_OPS_DSN", "")
@@ -14,8 +119,8 @@ func TestNewConfigurationDefaults(t *testing.T) {
 
 	c := NewConfiguration()
 
-	if c.Environment != "development" {
-		t.Errorf("Environment = %q, want %q", c.Environment, "development")
+	if c.Environment != "production" {
+		t.Errorf("Environment = %q, want %q", c.Environment, "production")
 	}
 	if c.QueueSize != 1000 {
 		t.Errorf("QueueSize = %d, want 1000", c.QueueSize)

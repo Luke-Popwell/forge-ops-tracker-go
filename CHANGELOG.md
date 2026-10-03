@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.0 (2026-10-02)
+
+- **The default environment changed from `development` to `production`.** With `FORGE_OPS_ENVIRONMENT` unset and `c.Environment` not assigned, the client used to report itself as `development`, which isn't one of the default enabled environments (`production`, `staging`), so an app set up with only a DSN silently sent nothing. It now defaults to `production`, so a DSN alone is enough. A set but blank `FORGE_OPS_ENVIRONMENT` also means `production` now (it used to mean an empty environment, which never sent). To keep the old behavior, set `FORGE_OPS_ENVIRONMENT=development` (or `c.Environment = "development"`) wherever you don't want errors sent, such as developer machines and CI.
+- When a DSN is configured but the environment isn't enabled, `Init` now says so once per process, through `c.Logger` if one is set and on stderr otherwise: `[ForgeOps] Not sending: this environment is "development", and only production, staging are enabled. Set FORGE_OPS_ENVIRONMENT=production (or add "development" to the enabled environments) to send from here.` Nothing is printed when no DSN is configured. New `Configuration.NotSendingWarning()` returns that message, or "".
+- The README's `CaptureError` and `Flush` examples now include the `forgeops` import.
+- The Gin integration needs no update and keeps requiring v0.8.0 of this module.
+
 ## 0.9.0 (2026-10-01)
 
 - An error reported just before a program exits is no longer lost. Delivery happens on a background goroutine and Go has no exit hook, so returning from `main` (or calling `os.Exit`) right after `CaptureError` used to drop the event. New `forgeops.Flush(timeout time.Duration) bool` sends everything the client is still holding (queued errors and changes, the startup change snapshot, captured traces, buffered metrics and infrastructure readings, and the current performance window), waits at most `timeout`, and returns whether it all finished in time. Scripts, CLIs and cron jobs should `defer forgeops.Flush(2 * time.Second)` right after `Init`. `FlushMetrics` is unchanged.
