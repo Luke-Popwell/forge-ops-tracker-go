@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.1 (2026-10-07)
+
+- The module now ships its MIT licence (`LICENSE`). Earlier versions were published without one. No code changes.
+
 ## 0.10.0 (2026-10-02)
 
 - **The default environment changed from `development` to `production`.** With `FORGE_OPS_ENVIRONMENT` unset and `c.Environment` not assigned, the client used to report itself as `development`, which isn't one of the default enabled environments (`production`, `staging`), so an app set up with only a DSN silently sent nothing. It now defaults to `production`, so a DSN alone is enough. A set but blank `FORGE_OPS_ENVIRONMENT` also means `production` now (it used to mean an empty environment, which never sent). To keep the old behavior, set `FORGE_OPS_ENVIRONMENT=development` (or `c.Environment = "development"`) wherever you don't want errors sent, such as developer machines and CI.
