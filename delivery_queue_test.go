@@ -138,3 +138,26 @@ func TestDeliveryQueueFlushGivesUpWhenTheQueueStaysFull(t *testing.T) {
 		t.Fatal("Flush() = true, want false: there was never room to queue behind the backlog")
 	}
 }
+
+func TestDeliveryQueueNeverSendsAnEventAgainAfterTheServerRejectsOrFailsIt(t *testing.T) {
+	for _, status := range []int{http.StatusUnprocessableEntity, http.StatusInternalServerError} {
+		var received int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&received, 1)
+			w.WriteHeader(status)
+		}))
+
+		config := &Configuration{DSN: "http://key@" + server.Listener.Addr().String() + "/events", QueueSize: 10, Timeout: time.Second, Logger: noopLogger{}}
+		queue := NewDeliveryQueue(config, NewClient(config))
+		queue.Push(map[string]any{"n": 1})
+
+		if !queue.Flush(2 * time.Second) {
+			t.Fatalf("Flush() = false after a %d, want true: a dropped event still counts as done", status)
+		}
+		queue.Flush(2 * time.Second)
+		if got := atomic.LoadInt32(&received); got != 1 {
+			t.Errorf("server answering %d received %d deliveries, want 1", status, got)
+		}
+		server.Close()
+	}
+}

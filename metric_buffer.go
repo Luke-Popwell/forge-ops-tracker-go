@@ -18,32 +18,48 @@ const MaxMetricEntries = 1000
 // class twice; here it is one type instantiated twice, told which delivery function and flush
 // interval to use.
 //
-// Three deliberate differences from the Ruby buffers:
+// Four deliberate differences from the Ruby buffers:
 //
 //   - A flush snapshots the first N entries and, on success, removes exactly those N, instead of
 //     resetting the whole list, so an entry recorded while the request is in flight (the lock is
 //     released around the network call) is kept for the next flush rather than lost.
 //   - The buffer is capped at MaxMetricEntries, and once full further entries are dropped until a
-//     flush succeeds: a plan without the feature answers 403 on every flush, and an uncapped buffer
-//     would then grow for as long as the process lives. Dropping the newest rather than the oldest
-//     keeps the entries a flush is delivering at the front of the slice, which is what makes
-//     removing exactly them afterward exact.
+//     flush makes room, so an outage can't grow it without bound. Dropping the newest rather than
+//     the oldest keeps the entries a flush is delivering at the front of the slice, which is what
+//     makes removing exactly them afterward exact.
+//   - A batch the server rejected (a 4xx other than 408 and 429, see deliveryRejected: a plan
+//     without the feature answers 403 on every flush) is dropped rather than kept, since it would
+//     be rejected again at every flush and, once the buffer was full, keep every new metric out
+//     too. A batch whose delivery failed maxFlushFailures flushes in a row is dropped as well.
 //   - A NaN or infinite value is dropped at record time: encoding/json refuses to marshal one, and
 //     one bad entry would make every batch behind it fail to send.
 //
 // Same sync.Once-guarded lazy goroutine start as PerformanceFlusher, for the same reason.
 type MetricBuffer struct {
 	configuration *Configuration
-	deliver       func(entries []map[string]any) bool
+	deliver       func(entries []map[string]any) deliveryOutcome
 	interval      func() time.Duration
 	mu            sync.Mutex
 	entries       []map[string]any
+	failures      int
 	once          sync.Once
 }
 
 // NewMetricBuffer builds a buffer that delivers through deliver and flushes every interval() (read
-// fresh on each tick, so a configuration change takes effect).
+// fresh on each tick, so a configuration change takes effect). A deliver that returns false is
+// taken as failed for now, never as rejected: a bool can't tell the two apart.
 func NewMetricBuffer(configuration *Configuration, deliver func([]map[string]any) bool, interval func() time.Duration) *MetricBuffer {
+	return newMetricBuffer(configuration, func(entries []map[string]any) deliveryOutcome {
+		if deliver(entries) {
+			return deliveryDelivered
+		}
+		return deliveryFailed
+	}, interval)
+}
+
+// newMetricBuffer is NewMetricBuffer for a deliver that can tell a rejected batch from one that
+// only failed for now, which is what this package's own two buffers use.
+func newMetricBuffer(configuration *Configuration, deliver func([]map[string]any) deliveryOutcome, interval func() time.Duration) *MetricBuffer {
 	return &MetricBuffer{configuration: configuration, deliver: deliver, interval: interval}
 }
 
@@ -73,7 +89,8 @@ func (b *MetricBuffer) Record(entry map[string]any) bool {
 }
 
 // Flush delivers everything buffered so far as one batch. A failed delivery keeps every entry, so
-// the next flush's batch just grows.
+// the next flush's batch just grows, until maxFlushFailures flushes in a row have failed and the
+// batch is dropped. A rejected batch is dropped at once.
 func (b *MetricBuffer) Flush() {
 	b.mu.Lock()
 	if len(b.entries) == 0 {
@@ -84,14 +101,26 @@ func (b *MetricBuffer) Flush() {
 	copy(snapshot, b.entries)
 	b.mu.Unlock()
 
-	if !b.deliver(snapshot) {
-		return
-	}
+	outcome := b.deliver(snapshot)
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	// Exactly the entries just delivered: anything recorded while the request was in flight sits
-	// after them and stays for the next flush.
+	switch outcome {
+	case deliveryDelivered:
+		b.failures = 0
+	case deliveryRejected:
+		b.failures = 0
+		b.configuration.Logger.Debugf("dropped %d metrics: the server rejected them, and would again", len(snapshot))
+	default:
+		b.failures++
+		if b.failures < maxFlushFailures {
+			return
+		}
+		b.failures = 0
+		b.configuration.Logger.Debugf("dropped %d metrics: delivery failed %d flushes in a row", len(snapshot), maxFlushFailures)
+	}
+	// Exactly the entries just delivered (or dropped): anything recorded while the request was in
+	// flight sits after them and stays for the next flush.
 	b.entries = b.entries[len(snapshot):]
 }
 

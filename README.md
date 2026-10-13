@@ -422,6 +422,10 @@ forgeops.Init(func(c *forgeops.Configuration) {
 Requires a ForgeOps plan that includes performance monitoring; on a plan that doesn't, the
 periodic flushes are accepted but not recorded, and the response says why.
 
+A flush that failed for now (a network error, a timeout, a 5xx, a 408 or a 429) keeps its window and
+sends it again with the next one; after 5 flushes in a row that failed, it is dropped. A flush the
+server rejects (any other 4xx) is dropped at once and never sent again.
+
 ## Custom metrics and infrastructure monitoring
 
 Two explicit calls (nothing is automatic, so there is no `Track*` flag): a business event you name
@@ -446,11 +450,13 @@ metrics along with errors and everything else (see
 Every entry is stored as it was captured (a signup is a row, not a running total), so a count or sum
 you compute later is exact. Both are a no-op when the client isn't enabled for the environment.
 
-A failed delivery keeps every entry for the next flush, and an entry captured while a delivery is in
-flight is kept too (the Ruby gem's own buffer loses it; a `-race` test pins this with a gated
-delivery). The buffer holds at most 1000 entries per kind and drops further ones until a flush
-succeeds, since a plan without the feature rejects every flush and would otherwise grow it for as
-long as the process lives. A NaN or infinite value is dropped at capture: `encoding/json` refuses to
+A delivery that failed for now (a network error, a timeout, a 5xx, a 408 or a 429) keeps every entry
+for the next flush, and an entry captured while a delivery is in flight is kept too (the Ruby gem's
+own buffer loses it; a `-race` test pins this with a gated delivery). After 5 flushes in a row that
+failed, the batch is dropped and the buffer starts clean. A batch the server rejects (any other 4xx,
+such as the 403 a plan without the feature answers) is dropped at once and never sent again. The
+buffer holds at most 1000 entries per kind and drops further ones until a flush makes room. Set
+`c.Logger` to see what was dropped and why. A NaN or infinite value is dropped at capture: `encoding/json` refuses to
 marshal one, which would make every batch behind it fail to send. Requires a ForgeOps plan that
 includes custom metrics / infrastructure monitoring.
 

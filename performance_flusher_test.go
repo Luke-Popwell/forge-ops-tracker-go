@@ -345,3 +345,148 @@ func TestPerformanceFlusherSendsAHistogramCountRecordedDuringDeliveryOnTheNextFl
 		}
 	}
 }
+
+// statusServer answers every request with whatever status currently holds, counting the requests
+// and remembering the last batch's first request_count.
+func statusServer(status *atomic.Int32, requests *atomic.Int32, lastCount *atomic.Int64) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if samples, _ := body["samples"].([]any); len(samples) > 0 {
+			lastCount.Store(int64(samples[0].(map[string]any)["request_count"].(float64)))
+		}
+		requests.Add(1)
+		w.WriteHeader(int(status.Load()))
+	}))
+}
+
+func TestPerformanceFlusherDropsABatchTheServerRejectsAndNeverSendsItAgain(t *testing.T) {
+	var status, requests atomic.Int32
+	var lastCount atomic.Int64
+	status.Store(http.StatusUnprocessableEntity)
+	server := statusServer(&status, &requests, &lastCount)
+	defer server.Close()
+
+	logger := &recordingLogger{}
+	config := newPerformanceConfiguration("http://key@" + server.Listener.Addr().String() + "/api/v1/events")
+	config.Logger = logger
+	flusher := NewPerformanceFlusher(config, NewClient(config))
+
+	flusher.Record("GET /posts/:id", 100)
+	flusher.Record("GET /posts/:id", 100)
+	flusher.Flush() // rejected: the bucket must be let go of
+	flusher.Flush() // nothing left to send
+
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("server received %d requests, want 1 (a rejected batch is never sent again)", got)
+	}
+	dropped := 0
+	for _, line := range logger.lines {
+		if line == "dropped 1 performance samples: the server rejected them, and would again" {
+			dropped++
+		}
+	}
+	if dropped != 1 {
+		t.Errorf("logged the drop %d times, want once: %q", dropped, logger.lines)
+	}
+
+	status.Store(http.StatusAccepted)
+	flusher.Record("GET /posts/:id", 100)
+	flusher.Flush()
+
+	if got := lastCount.Load(); got != 1 {
+		t.Errorf("request_count after the rejection = %d, want 1 (the rejected requests must not ride along)", got)
+	}
+}
+
+func TestPerformanceFlusherKeepsTheBucketWhenTheServerIsUnreachableOrRateLimiting(t *testing.T) {
+	config := newPerformanceConfiguration("http://key@127.0.0.1:1/api/v1/events")
+	config.Timeout = 200 * time.Millisecond
+	flusher := NewPerformanceFlusher(config, NewClient(config))
+
+	flusher.Record("GET /posts/:id", 100)
+	flusher.Flush()
+
+	if bucket := flusher.buckets["GET /posts/:id"]; bucket == nil || bucket.count != 1 {
+		t.Fatalf("bucket after a network failure = %v, want it kept with count 1", bucket)
+	}
+
+	var status, requests atomic.Int32
+	var lastCount atomic.Int64
+	status.Store(http.StatusTooManyRequests)
+	server := statusServer(&status, &requests, &lastCount)
+	defer server.Close()
+
+	config = newPerformanceConfiguration("http://key@" + server.Listener.Addr().String() + "/api/v1/events")
+	flusher = NewPerformanceFlusher(config, NewClient(config))
+	flusher.Record("GET /posts/:id", 100)
+	flusher.Flush()
+
+	if bucket := flusher.buckets["GET /posts/:id"]; bucket == nil || bucket.count != 1 {
+		t.Fatalf("bucket after a 429 = %v, want it kept with count 1", bucket)
+	}
+}
+
+func TestPerformanceFlusherDropsTheBatchOnTheFifthFailedFlushInARow(t *testing.T) {
+	var status, requests atomic.Int32
+	var lastCount atomic.Int64
+	status.Store(http.StatusServiceUnavailable)
+	server := statusServer(&status, &requests, &lastCount)
+	defer server.Close()
+
+	logger := &recordingLogger{}
+	config := newPerformanceConfiguration("http://key@" + server.Listener.Addr().String() + "/api/v1/events")
+	config.Logger = logger
+	flusher := NewPerformanceFlusher(config, NewClient(config))
+
+	for flush := 1; flush <= 4; flush++ {
+		flusher.Record("GET /posts/:id", 100)
+		flusher.Flush()
+		if bucket := flusher.buckets["GET /posts/:id"]; bucket == nil || bucket.count != int64(flush) {
+			t.Fatalf("bucket after failed flush %d = %v, want it kept with count %d", flush, bucket, flush)
+		}
+	}
+
+	flusher.Flush() // the fifth in a row
+	if len(flusher.buckets) != 0 {
+		t.Fatalf("buckets after the fifth failed flush = %v, want none", flusher.buckets)
+	}
+	flusher.Flush()
+	if got := requests.Load(); got != 5 {
+		t.Errorf("server received %d requests, want 5 (nothing left to send after the drop)", got)
+	}
+	if last := logger.lines[len(logger.lines)-1]; last != "dropped 1 performance samples: delivery failed 5 flushes in a row" {
+		t.Errorf("last log line = %q", last)
+	}
+
+	// Starts clean: the next batch gets five flushes of its own.
+	flusher.Record("GET /posts/:id", 100)
+	flusher.Flush()
+	if bucket := flusher.buckets["GET /posts/:id"]; bucket == nil || bucket.count != 1 {
+		t.Fatalf("bucket after the first failed flush of a new batch = %v, want it kept with count 1", bucket)
+	}
+}
+
+func TestPerformanceFlusherCountsOnlyFailedFlushesInARow(t *testing.T) {
+	var status, requests atomic.Int32
+	var lastCount atomic.Int64
+	server := statusServer(&status, &requests, &lastCount)
+	defer server.Close()
+
+	config := newPerformanceConfiguration("http://key@" + server.Listener.Addr().String() + "/api/v1/events")
+	flusher := NewPerformanceFlusher(config, NewClient(config))
+
+	for round := 0; round < 2; round++ {
+		status.Store(http.StatusInternalServerError)
+		for flush := 0; flush < 4; flush++ {
+			flusher.Record("GET /posts/:id", 100)
+			flusher.Flush()
+		}
+		status.Store(http.StatusAccepted)
+		flusher.Flush() // delivers all four, and resets the count of failures
+
+		if got := lastCount.Load(); got != 4 {
+			t.Fatalf("round %d delivered request_count = %d, want 4 (nothing dropped)", round, got)
+		}
+	}
+}

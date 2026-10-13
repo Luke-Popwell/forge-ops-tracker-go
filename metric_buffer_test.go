@@ -208,3 +208,150 @@ func TestMetricURIsSwapTheTrailingEventsSegment(t *testing.T) {
 		t.Errorf("infrastructure = %q", got)
 	}
 }
+
+func newOutcomeBuffer(logger Logger, deliver func([]map[string]any) deliveryOutcome) *MetricBuffer {
+	config := newMetricConfiguration("https://key@tracker.example.com/api/v1/events")
+	config.Logger = logger
+	return newMetricBuffer(config, deliver, func() time.Duration { return time.Hour })
+}
+
+func TestMetricBufferDropsABatchTheServerRejectsAndNeverSendsItAgain(t *testing.T) {
+	var delivered [][]string
+	logger := &recordingLogger{}
+	buffer := newOutcomeBuffer(logger, func(entries []map[string]any) deliveryOutcome {
+		delivered = append(delivered, names(entries))
+		return deliveryRejected
+	})
+
+	buffer.Record(map[string]any{"metric_name": "a", "value": 1.0})
+	buffer.Flush()
+	buffer.Flush() // nothing left: no second delivery
+	buffer.Record(map[string]any{"metric_name": "b", "value": 2.0})
+	buffer.Flush()
+
+	if len(delivered) != 2 || len(delivered[1]) != 1 || delivered[1][0] != "b" {
+		t.Fatalf("delivered = %v, want [[a] [b]]: a rejected entry is never sent again", delivered)
+	}
+	want := []string{"dropped 1 metrics: the server rejected them, and would again", "dropped 1 metrics: the server rejected them, and would again"}
+	if len(logger.lines) != 2 || logger.lines[0] != want[0] || logger.lines[1] != want[1] {
+		t.Errorf("log lines = %q, want one per dropped batch", logger.lines)
+	}
+}
+
+func TestMetricBufferThatFilledUpTakesNewMetricsAgainOnceARejectedBatchIsDropped(t *testing.T) {
+	buffer := newOutcomeBuffer(noopLogger{}, func([]map[string]any) deliveryOutcome { return deliveryRejected })
+	for i := 0; i < MaxMetricEntries; i++ {
+		buffer.Record(map[string]any{"metric_name": "m", "value": 1.0})
+	}
+	if buffer.Record(map[string]any{"metric_name": "m", "value": 1.0}) {
+		t.Fatal("a full buffer should drop a further entry")
+	}
+
+	buffer.Flush()
+
+	if !buffer.Record(map[string]any{"metric_name": "m", "value": 1.0}) {
+		t.Error("the buffer should take entries again after its rejected batch was dropped")
+	}
+}
+
+func TestMetricBufferDropsTheBatchOnTheFifthFailedFlushInARow(t *testing.T) {
+	var delivered [][]string
+	logger := &recordingLogger{}
+	buffer := newOutcomeBuffer(logger, func(entries []map[string]any) deliveryOutcome {
+		delivered = append(delivered, names(entries))
+		return deliveryFailed
+	})
+
+	buffer.Record(map[string]any{"metric_name": "a", "value": 1.0})
+	for flush := 1; flush <= 4; flush++ {
+		buffer.Flush()
+		if len(buffer.entries) != 1 {
+			t.Fatalf("entries after failed flush %d = %d, want the entry kept", flush, len(buffer.entries))
+		}
+	}
+	if len(logger.lines) != 0 {
+		t.Fatalf("log lines before the fifth failure = %q, want none", logger.lines)
+	}
+
+	buffer.Flush() // the fifth in a row
+	if len(buffer.entries) != 0 {
+		t.Fatalf("entries after the fifth failed flush = %d, want none", len(buffer.entries))
+	}
+	buffer.Flush()
+	if len(delivered) != 5 {
+		t.Errorf("deliveries = %d, want 5 (nothing left to send after the drop)", len(delivered))
+	}
+	if len(logger.lines) != 1 || logger.lines[0] != "dropped 1 metrics: delivery failed 5 flushes in a row" {
+		t.Errorf("log lines = %q", logger.lines)
+	}
+
+	// Starts clean: the next batch gets five flushes of its own.
+	buffer.Record(map[string]any{"metric_name": "b", "value": 2.0})
+	buffer.Flush()
+	if len(buffer.entries) != 1 {
+		t.Errorf("entries after the first failed flush of a new batch = %d, want 1", len(buffer.entries))
+	}
+}
+
+func TestMetricBufferCountsOnlyFailedFlushesInARow(t *testing.T) {
+	outcome := deliveryFailed
+	var last []string
+	buffer := newOutcomeBuffer(noopLogger{}, func(entries []map[string]any) deliveryOutcome {
+		last = names(entries)
+		return outcome
+	})
+
+	for round := 0; round < 2; round++ {
+		outcome = deliveryFailed
+		for flush := 0; flush < 4; flush++ {
+			buffer.Record(map[string]any{"metric_name": "m", "value": 1.0})
+			buffer.Flush()
+		}
+		outcome = deliveryDelivered
+		buffer.Flush() // delivers all four, and resets the count of failures
+
+		if len(last) != 4 || len(buffer.entries) != 0 {
+			t.Fatalf("round %d delivered %d entries with %d left, want 4 and 0 (nothing dropped)", round, len(last), len(buffer.entries))
+		}
+	}
+}
+
+func TestNewMetricBufferTreatsAFalseFromItsDeliverAsFailedForNow(t *testing.T) {
+	buffer := newTestBuffer(func([]map[string]any) bool { return false })
+	buffer.Record(map[string]any{"metric_name": "a", "value": 1.0})
+	buffer.Flush()
+	if len(buffer.entries) != 1 {
+		t.Errorf("entries = %d, want the entry kept for the next flush", len(buffer.entries))
+	}
+}
+
+func TestCaptureMetricIsNotSentAgainAfterThePlanRejectsIt(t *testing.T) {
+	var mu sync.Mutex
+	requests := map[string]int{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests[r.URL.Path]++
+		mu.Unlock()
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	resetForTesting()
+	defer resetForTesting()
+	Init(func(c *Configuration) {
+		c.DetectChanges = false
+		c.DSN = "http://key@" + server.Listener.Addr().String() + "/api/v1/events"
+		c.Environment = "production"
+		c.EnabledEnvironments = map[string]bool{"production": true}
+	})
+	CaptureMetric("signup", 1)
+	CaptureInfrastructureMetric("cpu", 0.42, "db-1")
+	FlushMetrics()
+	FlushMetrics()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if requests["/api/v1/custom_metrics"] != 1 || requests["/api/v1/infrastructure_metrics"] != 1 {
+		t.Errorf("requests = %v, want one per endpoint: a 403 is never retried", requests)
+	}
+}

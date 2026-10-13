@@ -84,8 +84,8 @@ func metricState() (*Configuration, *MetricBuffer, *MetricBuffer) {
 	if metricBuffer == nil {
 		config := configuration
 		client := NewClient(config)
-		metricBuffer = NewMetricBuffer(config, client.DeliverMetrics, func() time.Duration { return config.MetricFlushInterval })
-		infraBuffer = NewMetricBuffer(config, client.DeliverInfrastructureMetrics, func() time.Duration { return config.InfrastructureMetricFlushInterval })
+		metricBuffer = newMetricBuffer(config, client.deliverMetrics, func() time.Duration { return config.MetricFlushInterval })
+		infraBuffer = newMetricBuffer(config, client.deliverInfrastructureMetrics, func() time.Duration { return config.InfrastructureMetricFlushInterval })
 	}
 	return configuration, metricBuffer, infraBuffer
 }

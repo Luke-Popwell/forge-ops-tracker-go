@@ -31,6 +31,7 @@ type PerformanceFlusher struct {
 	mu            sync.Mutex
 	buckets       map[string]*performanceBucket
 	periodStart   time.Time
+	failures      int
 	once          sync.Once
 }
 
@@ -67,6 +68,11 @@ func (f *PerformanceFlusher) Record(transactionName string, durationMs float64) 
 // Flush snapshots and resets the buffered buckets, then delivers them as one batch. A failed
 // delivery keeps every bucket where it is rather than resetting, so the next flush's batch just
 // grows instead of losing what was already tallied; there's no other copy of this data anywhere.
+//
+// That only holds while sending again could still work. A batch the server rejected (a 4xx other
+// than 408 and 429, see deliveryRejected) is let go of at once: it would be rejected again at every
+// flush for as long as the process lives. So is a batch whose delivery has now failed
+// maxFlushFailures flushes in a row, which bounds what an outage that never ends can pile up.
 //
 // Only exactly what this snapshot actually delivered is ever removed afterward, subtracted from
 // whatever's currently in each bucket rather than the bucket (or the whole map) being wiped
@@ -106,11 +112,25 @@ func (f *PerformanceFlusher) Flush() {
 	}
 	f.mu.Unlock()
 
-	if !f.client.DeliverPerformanceSamples(samples) {
-		return
-	}
+	outcome := f.client.deliverPerformanceSamples(samples)
 
 	f.mu.Lock()
+	switch outcome {
+	case deliveryDelivered:
+		f.failures = 0
+	case deliveryRejected:
+		f.failures = 0
+		f.configuration.Logger.Debugf("dropped %d performance samples: the server rejected them, and would again", len(samples))
+	default:
+		f.failures++
+		if f.failures < maxFlushFailures {
+			f.mu.Unlock()
+			return
+		}
+		f.failures = 0
+		f.configuration.Logger.Debugf("dropped %d performance samples: delivery failed %d flushes in a row", len(samples), maxFlushFailures)
+	}
+	// Delivered or dropped, what this snapshot covered is let go of the same way.
 	for name, sent := range delivered {
 		current, ok := f.buckets[name]
 		if !ok {

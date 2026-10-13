@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -95,5 +96,52 @@ func TestClientDeliverPerformanceSamplesPostsTheBatchWrappedInSamples(t *testing
 	samples, _ := gotBody["samples"].([]any)
 	if len(samples) != 1 {
 		t.Fatalf("samples length = %d, want 1", len(samples))
+	}
+}
+
+func TestOutcomeForStatusTellsDeliveredRejectedAndFailedForNowApart(t *testing.T) {
+	cases := map[int]deliveryOutcome{
+		200: deliveryDelivered, 202: deliveryDelivered, 204: deliveryDelivered,
+		400: deliveryRejected, 401: deliveryRejected, 403: deliveryRejected, 404: deliveryRejected, 413: deliveryRejected, 422: deliveryRejected,
+		408: deliveryFailed, 429: deliveryFailed,
+		500: deliveryFailed, 502: deliveryFailed, 503: deliveryFailed,
+		302: deliveryFailed,
+	}
+	for status, want := range cases {
+		if got := outcomeForStatus(status); got != want {
+			t.Errorf("outcomeForStatus(%d) = %v, want %v", status, got, want)
+		}
+	}
+}
+
+func TestClientPostReportsARejectionAndAFailureForNowDifferently(t *testing.T) {
+	var status atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(int(status.Load()))
+	}))
+	defer server.Close()
+
+	config := &Configuration{DSN: "http://key@" + server.Listener.Addr().String() + "/api/v1/events", Timeout: time.Second, Logger: noopLogger{}}
+	client := NewClient(config)
+
+	for code, want := range map[int32]deliveryOutcome{202: deliveryDelivered, 403: deliveryRejected, 429: deliveryFailed, 503: deliveryFailed} {
+		status.Store(code)
+		if got := client.deliverMetrics([]map[string]any{{"metric_name": "signup"}}); got != want {
+			t.Errorf("deliverMetrics() against a %d = %v, want %v", code, got, want)
+		}
+	}
+
+	unreachable := NewClient(&Configuration{DSN: "http://key@127.0.0.1:1/api/v1/events", Timeout: 200 * time.Millisecond, Logger: noopLogger{}})
+	if got := unreachable.deliverMetrics(nil); got != deliveryFailed {
+		t.Errorf("deliverMetrics() against an unreachable host = %v, want deliveryFailed", got)
+	}
+}
+
+func TestClientPostTreatsAPayloadThatCannotBeEncodedAsRejected(t *testing.T) {
+	config := &Configuration{DSN: "http://key@127.0.0.1:1/api/v1/events", Timeout: 200 * time.Millisecond, Logger: noopLogger{}}
+	client := NewClient(config)
+
+	if got := client.deliverMetrics([]map[string]any{{"value": make(chan int)}}); got != deliveryRejected {
+		t.Errorf("deliverMetrics() = %v, want deliveryRejected: it can never be encoded, so never retried", got)
 	}
 }

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.0 (2026-10-13)
+
+- **A batch the server rejects is no longer re-sent forever.** Performance samples, custom metrics and infrastructure readings are sent in batches, and a batch whose delivery failed used to be kept and sent again at every flush, with whatever had been recorded since added to it, whatever the reason for the failure. A response that means the server will never take the batch (a 4xx other than 408 and 429: a revoked key, a plan without the feature, a payload it can't accept) now drops the batch at once. Before, an app on a plan without custom metrics re-sent the same metrics every minute for as long as it ran, and once 1000 of them were buffered every new metric was dropped as well.
+- A batch whose delivery failed for now (a network error, a timeout, a 5xx, a 408 or a 429) is still kept for the next flush, but only for so long: after 5 flushes in a row that failed, it is dropped and the next batch starts clean. The 1000 entry cap on each metric buffer is unchanged.
+- When a batch is dropped, `c.Logger` (if set) is told once how much was dropped and why, for example `dropped 12 metrics: the server rejected them, and would again`. A response that isn't a 2xx is now logged with its status (`delivery failed: the server answered 403`); only network errors were logged before.
+- Errors, changes and traces are unchanged: each is sent once and never retried.
+- No API changes. `Client.Deliver` and the other exported `Deliver...` methods still return `true` only for a 2xx, and a `MetricBuffer` built with `NewMetricBuffer` treats a `false` from its `deliver` as failed for now.
+- The Gin integration needs no update and keeps requiring v0.10.0 of this module; it uses none of the above.
+
 ## 0.10.1 (2026-10-07)
 
 - The module now ships its MIT licence (`LICENSE`). Earlier versions were published without one. No code changes.
