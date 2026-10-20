@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.13.0 (2026-10-20)
+
+- **Strict privacy: raw paths keep only their first segment.** With `StrictPrivacy` on, a span name or transaction name that is a raw path (one with no route parameter such as `:id` or `{id}`) used to keep every segment without a digit, so `/patients/jane-doe` went out as written. It is now cut to its first segment, then `/:path` if there was more: `GET /patients/jane-doe/12` is sent as `GET /patients/:path`. This matters most for the net/http integration, which names a request by its raw path when no route is set; set one with `SetRequestRoute` (or use Gin, or Go 1.22+ ServeMux patterns) to keep the whole route. A route template (`GET /patients/:id/notes`) is sent as it is. With strict privacy off, nothing changes.
+- The Gin integration needs no update.
+
 ## 0.12.0 (2026-10-20)
 
 - **Strict privacy.** New `Configuration.StrictPrivacy` (off by default) sends only structured facts about an error, for apps that can't let personal or health data leave their own servers: no message (a `message_fingerprint` computed in this process instead, so errors still group), no breadcrumbs (none are recorded), no `endpoint`, no SQL statement, no source context, the user's `id` only, and only the `context` and `tags` keys listed in the new `Configuration.PrivacyAllowedFields`, when their value is a string, number or boolean. Spans are named by method and host for outbound calls, with ids stripped from request paths, and keep only `db.statement` and `db.system` as data. Both can be set with `FORGE_OPS_STRICT_PRIVACY=true` and `FORGE_OPS_PRIVACY_ALLOWED_FIELDS=error_code,feature`; a value set in `Init` wins. With it off, nothing changes. See the README's "Strict privacy" section. A transaction name that's a raw path rather than a route has its ids stripped the same way in error events and performance samples. Span names, outbound hosts included, are read by hand rather than with a URL parser, so an address a parser would reject still loses its path.

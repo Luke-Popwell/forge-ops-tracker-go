@@ -77,8 +77,8 @@ func TestStrictPrivacySpanNameVectors(t *testing.T) {
 
 func TestStrictPrivacyPathVectors(t *testing.T) {
 	for _, vector := range loadStrictPrivacyVectors(t).Path {
-		if got := pathWithoutIDs(vector.Path); got != vector.Strict {
-			t.Errorf("pathWithoutIDs(%q) = %q, want %q", vector.Path, got, vector.Strict)
+		if got := strictPath(vector.Path); got != vector.Strict {
+			t.Errorf("strictPath(%q) = %q, want %q", vector.Path, got, vector.Strict)
 		}
 	}
 }
@@ -302,7 +302,7 @@ func TestStrictPrivacySpansKeepOnlyMethodHostAndStatementData(t *testing.T) {
 	if !reflect.DeepEqual(query["data"], map[string]any{"db.statement": "SELECT * FROM patients WHERE name = ?", "db.system": "postgresql"}) {
 		t.Errorf("database span data = %v", query["data"])
 	}
-	if root := spanNamed(t, trace, "GET /patients/:id/notes"); root["kind"] != "controller" {
+	if root := spanNamed(t, trace, "GET /patients/:path"); root["kind"] != "controller" {
 		t.Errorf("root = %v", root)
 	}
 }
@@ -323,12 +323,13 @@ func TestStrictPrivacyOffLeavesSpansAsBefore(t *testing.T) {
 	spanNamed(t, trace, "GET /patients/42/notes")
 }
 
-func TestStrictPrivacyTransactionNamesLoseRawPathIDs(t *testing.T) {
+func TestStrictPrivacyTransactionNamesKeepOnlyARawPathsFirstSegment(t *testing.T) {
 	cases := map[string]string{
-		"GET /patients/42/notes":   "GET /patients/:id/notes",
+		"GET /patients/42/notes":   "GET /patients/:path",
 		"GET /patients/{id}":       "GET /patients/{id}",
 		"OrdersController#create":  "OrdersController#create",
-		"/patients/jane-doe-1961":  "/patients/:id",
+		"/patients/jane-doe-1961":  "/patients/:path",
+		"GET /patients/jane-doe":   "GET /patients/:path",
 		"":                         "",
 		"invoicing.SyncWorker.Run": "invoicing.SyncWorker.Run",
 	}
@@ -356,7 +357,7 @@ func TestStrictPrivacyReportReducesARawPathTransactionName(t *testing.T) {
 
 		want := "GET /patients/42/notes"
 		if strict {
-			want = "GET /patients/:id/notes"
+			want = "GET /patients/:path"
 		}
 		if got := server.waitForEvent(t)["transaction_name"]; got != want {
 			t.Errorf("strict=%v: transaction_name = %v, want %q", strict, got, want)
@@ -375,7 +376,7 @@ func TestStrictPrivacyPerformanceSamplesReduceARawPathTransactionName(t *testing
 
 		flusher.mu.Lock()
 		_, raw := flusher.buckets["GET /patients/42/notes"]
-		_, reduced := flusher.buckets["GET /patients/:id/notes"]
+		_, reduced := flusher.buckets["GET /patients/:path"]
 		_, route := flusher.buckets["GET /orders/{id}"]
 		flusher.mu.Unlock()
 		if raw == strict || reduced != strict || !route {

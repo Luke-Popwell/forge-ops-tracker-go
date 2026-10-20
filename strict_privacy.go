@@ -150,39 +150,66 @@ func replaceNumbers(s string) string {
 	return out.String()
 }
 
-// pathWithoutIDs drops a path's query and fragment and replaces every segment that holds an ASCII
-// digit, or is longer than 40 characters, with ":id": "/patients/42/notes?q=x" is
-// "/patients/:id/notes". An empty result is "/".
-func pathWithoutIDs(path string) string {
+// strictPath is a request or page path under strict privacy, with no query or fragment. A route
+// template ("/patients/:id/notes", "/orders/{id}") is kept as it is: its words are a developer's and
+// its parameters are already placeholders. A raw path keeps only its first segment (":id" when it
+// holds an ASCII digit or is longer than 40 characters), then "/:path" if there was more, since
+// anything after it can name a person: "/patients/jane-doe/12" is "/patients/:path". No segments
+// at all is "/".
+func strictPath(path string) string {
 	if i := strings.IndexAny(path, "?#"); i >= 0 {
 		path = path[:i]
 	}
-	segments := strings.Split(path, "/")
-	// Trailing empty segments are dropped, so "/orders/" and "/orders" read the same, matching the
-	// server's own split.
-	for len(segments) > 0 && segments[len(segments)-1] == "" {
-		segments = segments[:len(segments)-1]
+	if isRouteTemplate(path) {
+		return path
 	}
-	for i, segment := range segments {
-		if strings.IndexAny(segment, "0123456789") >= 0 || utf8.RuneCountInString(segment) > 40 {
-			segments[i] = ":id"
+	var segments []string
+	for _, segment := range strings.Split(path, "/") {
+		if segment != "" {
+			segments = append(segments, segment)
 		}
 	}
-	if joined := strings.Join(segments, "/"); joined != "" {
-		return joined
+	if len(segments) == 0 {
+		return "/"
 	}
-	return "/"
+	first := segments[0]
+	if strings.IndexAny(first, "0123456789") >= 0 || utf8.RuneCountInString(first) > 40 {
+		first = ":id"
+	}
+	out := first
+	if strings.HasPrefix(path, "/") {
+		out = "/" + out
+	}
+	if len(segments) > 1 {
+		out += "/:path"
+	}
+	return out
+}
+
+// isRouteTemplate reports whether any segment of path is a route parameter: ":id", "{id}",
+// "<int:id>", "[slug]" or "*path".
+func isRouteTemplate(path string) bool {
+	for _, segment := range strings.Split(path, "/") {
+		wrapped := func(open, close string) bool {
+			return len(segment) > 2 && strings.HasPrefix(segment, open) && strings.HasSuffix(segment, close)
+		}
+		if (len(segment) > 1 && segment[0] == ':') || strings.HasPrefix(segment, "*") ||
+			wrapped("{", "}") || wrapped("<", ">") || wrapped("[", "]") {
+			return true
+		}
+	}
+	return false
 }
 
 // strictSpanName is a span's name under strict privacy: an outbound call keeps its method and host
 // ("GET https://api.example.com/patients/42?x=1" is "GET api.example.com"), a request named by its
-// path loses the ids in it ("GET /patients/42/notes" is "GET /patients/:id/notes"), so does a bare
-// path ("/patients/42" is "/patients/:id"), and any other name ("OrdersController#create") is kept.
+// path goes through strictPath ("GET /patients/42/notes" is "GET /patients/:path"), so does a bare
+// path ("/patients/42" is "/patients/:path"), and any other name ("OrdersController#create") is kept.
 // The host is read by hand, never with a URL parser, so an address a parser would reject still
 // loses its path.
 func strictSpanName(name string) string {
 	if strings.HasPrefix(name, "/") {
-		return pathWithoutIDs(name)
+		return strictPath(name)
 	}
 	match := strictHTTPMethod.FindStringSubmatch(name)
 	if match == nil {
@@ -194,11 +221,11 @@ func strictSpanName(name string) string {
 			return method + " " + host
 		}
 	}
-	return method + " " + pathWithoutIDs(target)
+	return method + " " + strictPath(target)
 }
 
 // strictTransactionName is a transaction name under strict privacy: a route or a controller action
-// is kept, but a raw path loses its ids, by the same rule as a span's name.
+// is kept, but a raw path keeps only its first segment, by the same rule as a span's name.
 func strictTransactionName(name string) string {
 	if strings.TrimSpace(name) == "" {
 		return name

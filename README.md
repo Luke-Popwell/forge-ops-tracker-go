@@ -216,12 +216,15 @@ privacy on, an error is sent as structured facts only, never free text a person 
   value is a string, number or boolean.
 
 Spans are reduced too: an outbound HTTP span is named by method and host alone
-(`GET api.example.com`), a request span named by its raw path has its ids replaced with `:id`, and
-span data keeps only `db.statement` (already masked) and `db.system`. The exception class, stack
-frames, release, environment, server and trace id are unchanged, as are metrics and change
-snapshots. A transaction name that's a route or a function name is sent as it is, but one that's
-a raw path (`GET /patients/42`) has its ids replaced the same way, in error events and performance
-samples (net/http names a request by its raw path when no route is set; see `SetRequestRoute`).
+(`GET api.example.com`), and span data keeps only `db.statement` (already masked) and `db.system`. A
+raw path (one with no route parameter like `:id` or `{id}` in it) keeps only its first segment, then
+`/:path` if there was more, since anything after it can name a person: `/patients/jane-doe/12` is
+sent as `/patients/:path`, `/42/edit` as `/:id/:path`. A route template (`/patients/:id/notes`) is
+sent as it is, so reporting routes rather than raw paths loses nothing. That applies to span names
+and to the transaction name in error events and performance samples; net/http names a request by its
+raw path when no route is set, so call `SetRequestRoute` (or use Gin, or Go 1.22+ ServeMux patterns)
+to keep the whole route. The exception class, stack frames, release, environment, server and trace
+id are unchanged, as are metrics and change snapshots.
 
 ```go
 forgeops.Init(func(c *forgeops.Configuration) {
