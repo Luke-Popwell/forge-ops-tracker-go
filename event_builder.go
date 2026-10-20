@@ -94,6 +94,9 @@ func (b *EventBuilder) Build(err error, context map[string]any, user map[string]
 	if b.configuration.ScrubPII {
 		payload = b.scrub(payload)
 	}
+	if b.configuration.StrictPrivacy {
+		payload = applyStrictPrivacy(payload, b.configuration.PrivacyAllowedFields)
+	}
 	return payload
 }
 
@@ -239,12 +242,13 @@ func (b *EventBuilder) isInApp(file string) bool {
 // has to be in-app (never a module-cache/stdlib frame: there'd be nothing meaningful to show,
 // and it's not the host app's own code to begin with), and configuration.CaptureSourceContext has
 // to be true (see Configuration for why it defaults to true and why ForgeOps' own per-project
-// setting, not this field, is the durable, protected way to turn it off). Best-effort: any file
+// setting, not this field, is the durable, protected way to turn it off), with StrictPrivacy off.
+// Best-effort: any file
 // that can't be read (deleted, permission denied, a path that only ever existed on the machine
 // that built the binary and isn't present on this one) just means this one frame gets no source
 // context, never a panic of its own.
 func (b *EventBuilder) attachSourceContext(frame Frame) Frame {
-	if !b.configuration.CaptureSourceContext || !frame.InApp {
+	if !b.configuration.CaptureSourceContext || b.configuration.StrictPrivacy || !frame.InApp {
 		return frame
 	}
 

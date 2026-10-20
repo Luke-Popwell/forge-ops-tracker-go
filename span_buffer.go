@@ -251,8 +251,9 @@ func maskDatabaseSpanData(data map[string]any) map[string]any {
 // request nothing over the wire. A request that errored (an error reported with its context, or a
 // panic an integration saw pass through; see MarkRequestErrored) is sent however fast it was,
 // since what led up to an error is exactly what an issue page wants to show next to it. Mirrors
-// gems/forge_ops_tracker's SpanTracing middleware's own ensure block. Called by the Timing
-// middlewares; a no-op when ctx carries no trace.
+// gems/forge_ops_tracker's SpanTracing middleware's own ensure block. With StrictPrivacy on, every
+// span goes out as strictSpan leaves it. Called by the Timing middlewares; a no-op when ctx carries
+// no trace.
 func FinishTrace(ctx context.Context, name string, startedAt time.Time, duration time.Duration) {
 	buffer := traceFromContext(ctx)
 	if buffer == nil {
@@ -261,7 +262,13 @@ func FinishTrace(ctx context.Context, name string, startedAt time.Time, duration
 	config, queue := spanState()
 	buffer.record(buffer.rootSpanID, "", name, "controller", startedAt, float64(duration)/float64(time.Millisecond), nil, true)
 	if buffer.isSlow(float64(config.TraceCaptureThreshold)/float64(time.Millisecond)) || requestErrored(ctx) {
-		queue.Push(map[string]any{"trace_id": buffer.traceID, "spans": buffer.snapshot()})
+		spans := buffer.snapshot()
+		if config.StrictPrivacy {
+			for i, span := range spans {
+				spans[i] = strictSpan(span)
+			}
+		}
+		queue.Push(map[string]any{"trace_id": buffer.traceID, "spans": spans})
 	}
 }
 

@@ -46,6 +46,10 @@ func NewPerformanceFlusher(configuration *Configuration, client *Client) *Perfor
 
 // Record buckets one request's own duration under transactionName.
 func (f *PerformanceFlusher) Record(transactionName string, durationMs float64) {
+	// Under strict privacy a raw path loses its ids before it's ever a bucket's name.
+	if f.configuration.StrictPrivacy {
+		transactionName = strictTransactionName(transactionName)
+	}
 	f.once.Do(func() { go f.run() })
 
 	f.mu.Lock()

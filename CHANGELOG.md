@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.12.0 (2026-10-20)
+
+- **Strict privacy.** New `Configuration.StrictPrivacy` (off by default) sends only structured facts about an error, for apps that can't let personal or health data leave their own servers: no message (a `message_fingerprint` computed in this process instead, so errors still group), no breadcrumbs (none are recorded), no `endpoint`, no SQL statement, no source context, the user's `id` only, and only the `context` and `tags` keys listed in the new `Configuration.PrivacyAllowedFields`, when their value is a string, number or boolean. Spans are named by method and host for outbound calls, with ids stripped from request paths, and keep only `db.statement` and `db.system` as data. Both can be set with `FORGE_OPS_STRICT_PRIVACY=true` and `FORGE_OPS_PRIVACY_ALLOWED_FIELDS=error_code,feature`; a value set in `Init` wins. With it off, nothing changes. See the README's "Strict privacy" section. A transaction name that's a raw path rather than a route has its ids stripped the same way in error events and performance samples. Span names, outbound hosts included, are read by hand rather than with a URL parser, so an address a parser would reject still loses its path.
+- The Gin integration needs no update.
+
 ## 0.11.0 (2026-10-13)
 
 - **A batch the server rejects is no longer re-sent forever.** Performance samples, custom metrics and infrastructure readings are sent in batches, and a batch whose delivery failed used to be kept and sent again at every flush, with whatever had been recorded since added to it, whatever the reason for the failure. A response that means the server will never take the batch (a 4xx other than 408 and 429: a revoked key, a plan without the feature, a payload it can't accept) now drops the batch at once. Before, an app on a plan without custom metrics re-sent the same metrics every minute for as long as it ran, and once 1000 of them were buffered every new metric was dropped as well.

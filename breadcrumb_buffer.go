@@ -100,7 +100,8 @@ type breadcrumbContextKey struct{}
 // reused across requests) rather than assumed to work the same way Ruby's thread pool does.
 func WithBreadcrumbs(ctx context.Context) context.Context {
 	config, _ := state()
-	if !config.TrackBreadcrumbs || !config.IsEnabled() {
+	// Strict privacy never sends breadcrumbs, so none are recorded either.
+	if !config.TrackBreadcrumbs || config.StrictPrivacy || !config.IsEnabled() {
 		return ctx
 	}
 	return context.WithValue(ctx, breadcrumbContextKey{}, newBreadcrumbBuffer(config.MaxBreadcrumbs))

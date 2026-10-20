@@ -201,6 +201,42 @@ forgeops.Init(func(c *forgeops.Configuration) {
 })
 ```
 
+## Strict privacy
+
+For apps that can't let personal or health data (PII, PHI) leave their own servers. With strict
+privacy on, an error is sent as structured facts only, never free text a person could have typed:
+
+- no message: a `message_fingerprint` is sent instead, a one-way hash of the message (as PII
+  scrubbing leaves it) with its numbers, hex ids and UUIDs taken out, computed in this process, so
+  errors still group by message;
+- no breadcrumbs (none are recorded), no `endpoint`, no SQL statement (`sql_objects`, the table and
+  procedure names, still go), and no source context;
+- the user's `id` only, never an email or username;
+- `context` and `tags` keep only the keys you list in `PrivacyAllowedFields`, and only when the
+  value is a string, number or boolean.
+
+Spans are reduced too: an outbound HTTP span is named by method and host alone
+(`GET api.example.com`), a request span named by its raw path has its ids replaced with `:id`, and
+span data keeps only `db.statement` (already masked) and `db.system`. The exception class, stack
+frames, release, environment, server and trace id are unchanged, as are metrics and change
+snapshots. A transaction name that's a route or a function name is sent as it is, but one that's
+a raw path (`GET /patients/42`) has its ids replaced the same way, in error events and performance
+samples (net/http names a request by its raw path when no route is set; see `SetRequestRoute`).
+
+```go
+forgeops.Init(func(c *forgeops.Configuration) {
+    c.StrictPrivacy = true
+    c.PrivacyAllowedFields = []string{"error_code", "feature"}
+})
+```
+
+Both are off and empty by default, and can be set from the environment instead:
+`FORGE_OPS_STRICT_PRIVACY=true` and `FORGE_OPS_PRIVACY_ALLOWED_FIELDS=error_code,feature` (comma
+separated). A value set in `Init` wins over the environment.
+
+ForgeOps applies the same rules again on arrival when the project's own Strict privacy setting is
+on, so an app with an older or misconfigured client still can't get text stored for that project.
+
 ## Distributed tracing
 
 Each request gets its own trace: a root span for the request plus a tree of spans nested under it

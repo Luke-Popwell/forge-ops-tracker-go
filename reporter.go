@@ -37,11 +37,17 @@ func (r *Reporter) report(err error, context map[string]any, user map[string]any
 	if trace.transactionName != "" {
 		payload["transaction_name"] = trace.transactionName
 	}
-	if trace.endpoint != "" {
+	// A raw path can name a person, so strict privacy never sends one; transaction_name stays.
+	if trace.endpoint != "" && !r.configuration.StrictPrivacy {
 		payload["endpoint"] = trace.endpoint
 	}
 	if trace.traceID != "" {
 		payload["trace_id"] = trace.traceID
+	}
+	if r.configuration.StrictPrivacy {
+		if name, ok := payload["transaction_name"].(string); ok {
+			payload["transaction_name"] = strictTransactionName(name)
+		}
 	}
 	r.deliveryQueue.Push(payload)
 }
