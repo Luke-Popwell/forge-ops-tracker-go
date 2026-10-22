@@ -4,6 +4,8 @@ Go error reporting client for [ForgeOps](https://getforgeops.net). Requires
 Go 1.21+. It captures panics and reported `error` values, builds a backtrace, scrubs likely PII, and
 delivers events to ForgeOps over HTTP without blocking the caller.
 
+> For health or personal data, turn on [strict privacy](#strict-privacy): the SDK then sends only structured facts about each error (its type, stack trace, release and route), never the message, a raw path, breadcrumbs, or context you haven't allowed.
+
 ## Installation
 
 ```
