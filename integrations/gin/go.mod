@@ -3,7 +3,7 @@ module github.com/Luke-Popwell/forge-ops-tracker-go/integrations/gin
 go 1.27.0
 
 require (
-	github.com/Luke-Popwell/forge-ops-tracker-go v0.13.1
+	github.com/Luke-Popwell/forge-ops-tracker-go v0.14.0
 	github.com/gin-gonic/gin v1.10.0
 )
 
