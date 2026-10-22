@@ -45,13 +45,21 @@ func defaultStrictPrivacy() (bool, []string) {
 	return strictPrivacyFromEnvironment(os.Getenv)
 }
 
-// normalizeMessage returns message with hex object ids, UUIDs and standalone numbers replaced, in
-// that order: "0x" plus 4 or more hex digits becomes "0x", a UUID becomes "<uuid>" and a run of
-// digits becomes "<n>", the last two only where no ASCII word character ([A-Za-z0-9_]) touches
-// them. RE2 has no lookbehind, so each step is a scan that checks the neighbouring bytes by hand.
-// Every pattern byte is ASCII and no byte of a multi-byte UTF-8 character is, so scanning bytes
-// never splits or misreads a character.
+// strictEmail is the PII scrubber's email pattern. RE2's leftmost-first matching gives the same
+// matches as a backtracking engine for it, so it needs no hand-written scan.
+var strictEmail = regexp.MustCompile(`[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`)
+
+// normalizeMessage returns message with emails, quoted values, hex object ids, UUIDs and
+// standalone numbers replaced, in that order: an email becomes "<email>", a double-quoted or
+// single-quoted run (quotes included, never across a line break) becomes "<str>", "0x" plus 4 or
+// more hex digits becomes "0x", a UUID becomes "<uuid>" and a run of digits becomes "<n>". A single
+// quote only opens or closes a run, and a UUID or number only counts, where no ASCII word character
+// ([A-Za-z0-9_]) touches it. RE2 has no lookbehind, so those steps are scans that check the
+// neighbouring bytes by hand. Every pattern byte is ASCII and no byte of a multi-byte UTF-8
+// character is, so scanning bytes never splits or misreads a character.
 func normalizeMessage(message string) string {
+	message = strictEmail.ReplaceAllLiteralString(message, "<email>")
+	message = replaceQuoted(replaceQuoted(message, '"', false), '\'', true)
 	return replaceNumbers(replaceUUIDs(replaceHexObjectIDs(message)))
 }
 
@@ -72,6 +80,30 @@ func isHexDigit(c byte) bool {
 
 func isDigit(c byte) bool {
 	return c >= '0' && c <= '9'
+}
+
+// replaceQuoted replaces each run of quote, then any bytes but quote, CR or LF, then quote, with
+// "<str>". With atWordBoundary, the opening quote can't directly follow an ASCII word character
+// and the closing one can't directly precede one; an opener whose closer fails that has no match,
+// and the scan moves on to the next byte.
+func replaceQuoted(s string, quote byte, atWordBoundary bool) string {
+	var out strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] == quote && (!atWordBoundary || i == 0 || !isASCIIWord(s[i-1])) {
+			end := i + 1
+			for end < len(s) && s[end] != quote && s[end] != '\r' && s[end] != '\n' {
+				end++
+			}
+			if end < len(s) && s[end] == quote && (!atWordBoundary || end+1 == len(s) || !isASCIIWord(s[end+1])) {
+				out.WriteString("<str>")
+				i = end + 1
+				continue
+			}
+		}
+		out.WriteByte(s[i])
+		i++
+	}
+	return out.String()
 }
 
 func replaceHexObjectIDs(s string) string {
