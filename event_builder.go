@@ -95,7 +95,7 @@ func (b *EventBuilder) Build(err error, context map[string]any, user map[string]
 		payload = b.scrub(payload)
 	}
 	if b.configuration.StrictPrivacy {
-		payload = applyStrictPrivacy(payload, b.configuration.PrivacyAllowedFields)
+		payload = applyStrictPrivacy(payload, b.configuration.PrivacyAllowedFields, b.configuration.PrivacyUserKey)
 	}
 	return payload
 }

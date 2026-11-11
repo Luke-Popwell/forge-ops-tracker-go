@@ -209,11 +209,14 @@ For apps that can't let personal or health data (PII, PHI) leave their own serve
 privacy on, an error is sent as structured facts only, never free text a person could have typed:
 
 - no message: a `message_fingerprint` is sent instead, a one-way hash of the message (as PII
-  scrubbing leaves it) with its numbers, hex ids and UUIDs taken out, computed in this process, so
+  scrubbing leaves it) with its emails, quoted values, numbers, hex ids and UUIDs taken out, computed in this process, so
   errors still group by message;
 - no breadcrumbs (none are recorded), no `endpoint`, no SQL statement (`sql_objects`, the table and
   procedure names, still go), and no source context;
-- the user's `id` only, never an email or username;
+- no user email or username, and never the raw `id`: with `PrivacyUserKey` set, the id is sent as a
+  keyed hash (HMAC-SHA256 with your key, which never leaves your app), so ForgeOps can still count
+  affected customers but can't read the id. Without a key, no user is sent at all. Keep the key the
+  same across servers and deploys, or one customer counts as two;
 - `context` and `tags` keep only the keys you list in `PrivacyAllowedFields`, and only when the
   value is a string, number or boolean.
 
@@ -232,12 +235,13 @@ id are unchanged, as are metrics and change snapshots.
 forgeops.Init(func(c *forgeops.Configuration) {
     c.StrictPrivacy = true
     c.PrivacyAllowedFields = []string{"error_code", "feature"}
+    c.PrivacyUserKey = os.Getenv("MY_FORGE_OPS_USER_KEY") // default "": no user sent
 })
 ```
 
-Both are off and empty by default, and can be set from the environment instead:
-`FORGE_OPS_STRICT_PRIVACY=true` and `FORGE_OPS_PRIVACY_ALLOWED_FIELDS=error_code,feature` (comma
-separated). A value set in `Init` wins over the environment.
+All three are off or empty by default, and can be set from the environment instead:
+`FORGE_OPS_STRICT_PRIVACY=true`, `FORGE_OPS_PRIVACY_ALLOWED_FIELDS=error_code,feature` (comma
+separated) and `FORGE_OPS_PRIVACY_USER_KEY=...`. A value set in `Init` wins over the environment.
 
 ForgeOps applies the same rules again on arrival when the project's own Strict privacy setting is
 on, so an app with an older or misconfigured client still can't get text stored for that project.

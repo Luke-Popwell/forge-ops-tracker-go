@@ -1,6 +1,7 @@
 package forgeops
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -28,9 +29,10 @@ var strictSpanDataKeys = []string{"db.statement", "db.system"}
 // strictHTTPMethod matches a span name that names an outbound call: "GET https://host/path".
 var strictHTTPMethod = regexp.MustCompile(`(?i)^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\S+)`)
 
-// strictPrivacyFromEnvironment reads FORGE_OPS_STRICT_PRIVACY and FORGE_OPS_PRIVACY_ALLOWED_FIELDS
-// through getenv, for NewConfiguration's defaults. Anything set on the Configuration afterwards wins.
-func strictPrivacyFromEnvironment(getenv func(string) string) (bool, []string) {
+// strictPrivacyFromEnvironment reads FORGE_OPS_STRICT_PRIVACY, FORGE_OPS_PRIVACY_ALLOWED_FIELDS and
+// FORGE_OPS_PRIVACY_USER_KEY through getenv, for NewConfiguration's defaults. Anything set on the
+// Configuration afterwards wins.
+func strictPrivacyFromEnvironment(getenv func(string) string) (bool, []string, string) {
 	on := strings.EqualFold(strings.TrimSpace(getenv("FORGE_OPS_STRICT_PRIVACY")), "true")
 	var fields []string
 	for _, field := range strings.Split(getenv("FORGE_OPS_PRIVACY_ALLOWED_FIELDS"), ",") {
@@ -38,10 +40,10 @@ func strictPrivacyFromEnvironment(getenv func(string) string) (bool, []string) {
 			fields = append(fields, field)
 		}
 	}
-	return on, fields
+	return on, fields, getenv("FORGE_OPS_PRIVACY_USER_KEY")
 }
 
-func defaultStrictPrivacy() (bool, []string) {
+func defaultStrictPrivacy() (bool, []string, string) {
 	return strictPrivacyFromEnvironment(os.Getenv)
 }
 
@@ -292,8 +294,9 @@ func strictHost(target string) (host string, ok bool) {
 
 // applyStrictPrivacy reduces a built error event to what strict privacy sends: the message is
 // replaced by its fingerprint; breadcrumbs, endpoint, sql_statement and source context are dropped;
-// context and tags keep only allowed keys with plain values; user keeps only its id.
-func applyStrictPrivacy(payload map[string]any, allowedFields []string) map[string]any {
+// context and tags keep only allowed keys with plain values; user keeps only its id, hashed with
+// userKey, and is left out when userKey is "".
+func applyStrictPrivacy(payload map[string]any, allowedFields []string, userKey string) map[string]any {
 	message, _ := payload["message"].(string)
 	payload["message"] = ""
 	payload["message_fingerprint"] = messageFingerprint(message)
@@ -312,8 +315,8 @@ func applyStrictPrivacy(payload map[string]any, allowedFields []string) map[stri
 		}
 	}
 
-	if id := strictUserID(payload["user"]); id != "" {
-		payload["user"] = map[string]any{"id": id}
+	if id := strictUserID(payload["user"]); id != "" && userKey != "" {
+		payload["user"] = map[string]any{"id": hashedUserID(id, userKey)}
 	} else {
 		delete(payload, "user")
 	}
@@ -372,6 +375,16 @@ func strictUserID(user any) string {
 		return ""
 	}
 	return id
+}
+
+// hashedUserID is "h1:" and the first 32 lowercase hex characters of HMAC-SHA256 of id, keyed with
+// the app's own secret (Configuration.PrivacyUserKey), which ForgeOps never sees. A raw id can be a
+// record number that identifies a person, and an unkeyed hash of a small number can be guessed back;
+// the same id still hashes the same under one key, so affected customers can be counted.
+func hashedUserID(id, key string) string {
+	mac := hmac.New(sha256.New, []byte(key))
+	mac.Write([]byte(id))
+	return "h1:" + hex.EncodeToString(mac.Sum(nil))[:fingerprintLength]
 }
 
 // strictSpan is one recorded span under strict privacy: its name per strictSpanName, and its data

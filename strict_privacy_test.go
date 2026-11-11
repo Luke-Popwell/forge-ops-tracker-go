@@ -29,6 +29,11 @@ type strictPrivacyVectors struct {
 		Path   string `json:"path"`
 		Strict string `json:"strict"`
 	} `json:"path"`
+	UserID []struct {
+		ID     string `json:"id"`
+		Key    string `json:"key"`
+		Hashed string `json:"hashed"`
+	} `json:"user_id"`
 }
 
 func loadStrictPrivacyVectors(t *testing.T) strictPrivacyVectors {
@@ -41,7 +46,7 @@ func loadStrictPrivacyVectors(t *testing.T) strictPrivacyVectors {
 	if err := json.Unmarshal(data, &vectors); err != nil {
 		t.Fatal(err)
 	}
-	if len(vectors.Fingerprint) == 0 || len(vectors.SpanName) == 0 || len(vectors.Path) == 0 {
+	if len(vectors.Fingerprint) == 0 || len(vectors.SpanName) == 0 || len(vectors.Path) == 0 || len(vectors.UserID) == 0 {
 		t.Fatal("vectors file is missing a section")
 	}
 	return vectors
@@ -51,6 +56,7 @@ func strictConfiguration() *Configuration {
 	config := testConfiguration()
 	config.StrictPrivacy = true
 	config.PrivacyAllowedFields = []string{"error_code", "feature", "nested"}
+	config.PrivacyUserKey = "customer-secret"
 	config.CaptureSQLObjects = true
 	config.CaptureSQLStatement = true
 	return config
@@ -83,23 +89,32 @@ func TestStrictPrivacyPathVectors(t *testing.T) {
 	}
 }
 
+func TestStrictPrivacyUserIDVectors(t *testing.T) {
+	for _, vector := range loadStrictPrivacyVectors(t).UserID {
+		if got := hashedUserID(vector.ID, vector.Key); got != vector.Hashed {
+			t.Errorf("hashedUserID(%q, %q) = %q, want %q", vector.ID, vector.Key, got, vector.Hashed)
+		}
+	}
+}
+
 func TestStrictPrivacyReadsTheEnvironment(t *testing.T) {
-	env := map[string]string{"FORGE_OPS_STRICT_PRIVACY": "true", "FORGE_OPS_PRIVACY_ALLOWED_FIELDS": "error_code, feature,,"}
-	on, fields := strictPrivacyFromEnvironment(func(key string) string { return env[key] })
-	if !on || !reflect.DeepEqual(fields, []string{"error_code", "feature"}) {
-		t.Errorf("got %v %v, want true [error_code feature]", on, fields)
+	env := map[string]string{"FORGE_OPS_STRICT_PRIVACY": "true", "FORGE_OPS_PRIVACY_ALLOWED_FIELDS": "error_code, feature,,", "FORGE_OPS_PRIVACY_USER_KEY": "customer-secret"}
+	on, fields, key := strictPrivacyFromEnvironment(func(key string) string { return env[key] })
+	if !on || !reflect.DeepEqual(fields, []string{"error_code", "feature"}) || key != "customer-secret" {
+		t.Errorf("got %v %v %q, want true [error_code feature] customer-secret", on, fields, key)
 	}
 
-	on, fields = strictPrivacyFromEnvironment(func(string) string { return "" })
-	if on || fields != nil {
-		t.Errorf("got %v %v with nothing set, want off and no fields", on, fields)
+	on, fields, key = strictPrivacyFromEnvironment(func(string) string { return "" })
+	if on || fields != nil || key != "" {
+		t.Errorf("got %v %v %q with nothing set, want off, no fields and no key", on, fields, key)
 	}
 
 	t.Setenv("FORGE_OPS_STRICT_PRIVACY", "true")
 	t.Setenv("FORGE_OPS_PRIVACY_ALLOWED_FIELDS", "error_code")
+	t.Setenv("FORGE_OPS_PRIVACY_USER_KEY", "customer-secret")
 	config := NewConfiguration()
-	if !config.StrictPrivacy || !reflect.DeepEqual(config.PrivacyAllowedFields, []string{"error_code"}) {
-		t.Errorf("NewConfiguration() = %v %v, want strict privacy on with error_code", config.StrictPrivacy, config.PrivacyAllowedFields)
+	if !config.StrictPrivacy || !reflect.DeepEqual(config.PrivacyAllowedFields, []string{"error_code"}) || config.PrivacyUserKey != "customer-secret" {
+		t.Errorf("NewConfiguration() = %v %v %q, want strict privacy on with error_code and the key", config.StrictPrivacy, config.PrivacyAllowedFields, config.PrivacyUserKey)
 	}
 }
 
@@ -126,8 +141,8 @@ func TestStrictPrivacyEventSendsNoFreeText(t *testing.T) {
 	if !reflect.DeepEqual(payload["context"], map[string]any{"error_code": "E42", "feature": 7}) {
 		t.Errorf("context = %v, want only the allowed plain values", payload["context"])
 	}
-	if !reflect.DeepEqual(payload["user"], map[string]any{"id": "42"}) {
-		t.Errorf("user = %v, want only the id as a string", payload["user"])
+	if !reflect.DeepEqual(payload["user"], map[string]any{"id": "h1:316d4a35bc95112698f59ef5aac5c29a"}) {
+		t.Errorf("user = %v, want only the hashed id", payload["user"])
 	}
 	if payload["sql_objects"] == nil {
 		t.Errorf("sql_objects = %v, want them kept", payload["sql_objects"])
@@ -138,6 +153,23 @@ func TestStrictPrivacyEventSendsNoFreeText(t *testing.T) {
 	for _, frame := range payload["backtrace"].([]Frame) {
 		if frame.ContextLine != nil || frame.PreContext != nil || frame.PostContext != nil {
 			t.Errorf("frame %v carries source context", frame)
+		}
+	}
+}
+
+func TestStrictPrivacySendsNoUserWithoutAKey(t *testing.T) {
+	config := strictConfiguration()
+	config.PrivacyUserKey = ""
+	payload := NewEventBuilder(config).Build(errors.New("boom"), nil, map[string]any{"id": 42, "email": "jane@example.com"}, capturePcs(), nil)
+	if _, present := payload["user"]; present {
+		t.Errorf("user = %v, want it left out without a key", payload["user"])
+	}
+
+	config.PrivacyUserKey = "customer-secret"
+	for _, user := range []map[string]any{{"id": "  "}, {"id": nil}, {"email": "jane@example.com"}} {
+		payload = NewEventBuilder(config).Build(errors.New("boom"), nil, user, capturePcs(), nil)
+		if _, present := payload["user"]; present {
+			t.Errorf("user = %v for %v, want it left out without an id", payload["user"], user)
 		}
 	}
 }
@@ -168,7 +200,7 @@ func TestStrictPrivacyLeavesOutContextUserAndSourceContextWhenNothingIsLeft(t *t
 	}
 
 	context, pre := "line", []string{"before"}
-	stripped := applyStrictPrivacy(map[string]any{"message": "boom", "backtrace": []Frame{{File: "/app/main.go", Line: 3, Method: "main.run", InApp: true, ContextLine: &context, PreContext: &pre, PostContext: &pre}}}, nil)
+	stripped := applyStrictPrivacy(map[string]any{"message": "boom", "backtrace": []Frame{{File: "/app/main.go", Line: 3, Method: "main.run", InApp: true, ContextLine: &context, PreContext: &pre, PostContext: &pre}}}, nil, "")
 	if !reflect.DeepEqual(stripped["backtrace"], []Frame{{File: "/app/main.go", Line: 3, Method: "main.run", InApp: true}}) {
 		t.Errorf("backtrace = %v, want file, line, method and in_app only", stripped["backtrace"])
 	}

@@ -126,24 +126,30 @@ type Configuration struct {
 
 	// StrictPrivacy sends only structured facts about an error, never free text that could hold
 	// personal or health data: no message (a fingerprint of it instead, so errors still group), no
-	// breadcrumbs, endpoint, SQL statement or source context, only the user's id, and only the
-	// context and tag keys named in PrivacyAllowedFields. Outbound HTTP spans are named by method and
-	// host alone and keep no data beyond the masked statement and database system. Off by default;
-	// FORGE_OPS_STRICT_PRIVACY=true turns it on. See strict_privacy.go.
+	// breadcrumbs, endpoint, SQL statement or source context, the user's id only as a keyed hash
+	// (PrivacyUserKey), and only the context and tag keys named in PrivacyAllowedFields. Outbound
+	// HTTP spans are named by method and host alone and keep no data beyond the masked statement and
+	// database system. Off by default; FORGE_OPS_STRICT_PRIVACY=true turns it on. See
+	// strict_privacy.go.
 	StrictPrivacy bool
 	// PrivacyAllowedFields are the context and tag keys strict privacy still sends, when their value
 	// is a string, number or boolean (your own error codes, say). Empty by default;
 	// FORGE_OPS_PRIVACY_ALLOWED_FIELDS=error_code,feature sets it.
 	PrivacyAllowedFields []string
+	// PrivacyUserKey is the secret strict privacy hashes the user's id with (HMAC-SHA256), so the
+	// raw id never leaves your app; empty, the default, sends no user at all. Keep it the same
+	// across deploys and servers, or the same customer counts as two. FORGE_OPS_PRIVACY_USER_KEY
+	// sets it.
+	PrivacyUserKey string
 }
 
 // NewConfiguration returns a Configuration seeded from FORGE_OPS_DSN/FORGE_OPS_ENVIRONMENT/
-// FORGE_OPS_RELEASE (plus FORGE_OPS_STRICT_PRIVACY/FORGE_OPS_PRIVACY_ALLOWED_FIELDS) and sensible defaults for everything else: the same env vars and defaults
+// FORGE_OPS_RELEASE (plus FORGE_OPS_STRICT_PRIVACY/FORGE_OPS_PRIVACY_ALLOWED_FIELDS/FORGE_OPS_PRIVACY_USER_KEY) and sensible defaults for everything else: the same env vars and defaults
 // every other client in this repo reads. Environment is "production" unless FORGE_OPS_ENVIRONMENT
 // says otherwise (see resolveEnvironment).
 func NewConfiguration() *Configuration {
 	cwd, _ := os.Getwd()
-	strictPrivacy, privacyAllowedFields := defaultStrictPrivacy()
+	strictPrivacy, privacyAllowedFields, privacyUserKey := defaultStrictPrivacy()
 	return &Configuration{
 		DSN:                               os.Getenv("FORGE_OPS_DSN"),
 		Environment:                       resolveEnvironment(os.Getenv),
@@ -169,6 +175,7 @@ func NewConfiguration() *Configuration {
 		DetectChanges:                     true,
 		StrictPrivacy:                     strictPrivacy,
 		PrivacyAllowedFields:              privacyAllowedFields,
+		PrivacyUserKey:                    privacyUserKey,
 	}
 }
 
